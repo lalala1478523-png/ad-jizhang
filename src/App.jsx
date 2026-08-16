@@ -7,6 +7,13 @@ const AD_MATERIALS = [
   '铜牌腐蚀', '条幅横幅', '名片画册', '其他定制'
 ];
 
+const EXPENSE_CATEGORIES = [
+  '原材料进货', '外协加工代工', '人员与安装工费', 
+  '房租与水电', '设备维护与耗材', '物流运输与差旅', '日常杂费与运营'
+];
+
+const PAYMENT_METHODS = ['微信支付', '支付宝', '对公转账', '现金支付', '其他'];
+
 // 系统访问凭证配置
 const DEFAULT_ACCOUNT = {
   username: 'admin',
@@ -14,7 +21,6 @@ const DEFAULT_ACCOUNT = {
 };
 
 export default function App() {
-  // 获取系统当前年、月（动态获取，不再硬编码）
   const currentDate = new Date();
   const currentYearStr = currentDate.getFullYear().toString();
   const currentMonthStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
@@ -26,25 +32,38 @@ export default function App() {
   const [loginInput, setLoginInput] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
 
+  // 金额隐私模式（小眼睛开关）：默认隐蔽 false (不显示明文金额)
+  const [showAmount, setShowAmount] = useState(() => {
+    const saved = localStorage.getItem('beibei_show_amount');
+    return saved !== null ? saved === 'true' : false; // 默认隐蔽
+  });
+
+  // 主Tab切换：'income' (收入/订单) | 'expense' (公司支出)
+  const [activeTab, setActiveTab] = useState('income');
+
+  // 数据列表状态
   const [orders, setOrders] = useState([]);
+  const [expenses, setExpenses] = useState([]);
   const [loading, setLoading] = useState(true);
   
-  // 默认进入为：'month'（按单月查看），并定位到当月
+  // 筛选周期：'month' | 'year' | 'all'
   const [periodMode, setPeriodMode] = useState('month'); 
   const [selectedYear, setSelectedYear] = useState(currentYearStr);
   const [selectedMonth, setSelectedMonth] = useState(currentMonthStr);
   
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('全部'); // 全部 | 待结清 | 已结清
+  const [statusFilter, setStatusFilter] = useState('全部'); // 收入状态筛选
+  const [expenseCatFilter, setExpenseCatFilter] = useState('全部'); // 支出分类筛选
 
   // 弹窗状态
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [statementCustomer, setStatementCustomer] = useState(null); // 对账单客户
+  const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
+  const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
+  const [statementCustomer, setStatementCustomer] = useState(null);
 
-  // 表单状态
-  const [pricingMode, setPricingMode] = useState('area'); // area (按面积) | fixed (固定总价)
+  // 收入订单表单
+  const [pricingMode, setPricingMode] = useState('area');
   const [calcData, setCalcData] = useState({ length: '', width: '', quantity: '1', unitPrice: '' });
-  const [formData, setFormData] = useState({
+  const [orderFormData, setOrderFormData] = useState({
     customer_name: '',
     phone: '',
     order_date: new Date().toISOString().split('T')[0],
@@ -57,25 +76,45 @@ export default function App() {
     notes: ''
   });
 
-  // 获取数据
-  const fetchOrders = async () => {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('orders')
-      .select('*')
-      .order('order_date', { ascending: false });
+  // 支出表单
+  const [expenseFormData, setExpenseFormData] = useState({
+    expense_date: new Date().toISOString().split('T')[0],
+    category: '原材料进货',
+    amount: '',
+    payee: '',
+    payment_method: '微信支付',
+    notes: ''
+  });
 
-    if (error) {
-      console.error('获取数据失败:', error);
-    } else {
-      setOrders(data || []);
-    }
+  // 切换隐私小眼睛
+  const toggleAmountVisibility = () => {
+    const nextVal = !showAmount;
+    setShowAmount(nextVal);
+    localStorage.setItem('beibei_show_amount', String(nextVal));
+  };
+
+  // 格式化金额显示（受小眼睛管控）
+  const formatMoney = (amount, prefix = '¥') => {
+    if (!showAmount) return `${prefix} ****`;
+    return `${prefix}${parseFloat(amount || 0).toFixed(2)}`;
+  };
+
+  // 获取数据
+  const fetchData = async () => {
+    setLoading(true);
+    const [ordersRes, expensesRes] = await Promise.all([
+      supabase.from('orders').select('*').order('order_date', { ascending: false }),
+      supabase.from('expenses').select('*').order('expense_date', { ascending: false })
+    ]);
+
+    if (ordersRes.data) setOrders(ordersRes.data);
+    if (expensesRes.data) setExpenses(expensesRes.data);
     setLoading(false);
   };
 
   useEffect(() => {
     if (isAuthenticated) {
-      fetchOrders();
+      fetchData();
     }
   }, [isAuthenticated]);
 
@@ -94,7 +133,7 @@ export default function App() {
     }
   };
 
-  // 处理退出
+  // 退出登录
   const handleLogout = () => {
     if (window.confirm('确定要退出当前管理系统吗？')) {
       localStorage.removeItem('beibei_auth_logged');
@@ -103,7 +142,7 @@ export default function App() {
     }
   };
 
-  // 自动算料计算总价
+  // 自动算料
   useEffect(() => {
     if (pricingMode === 'area') {
       const l = parseFloat(calcData.length) || 0;
@@ -115,24 +154,24 @@ export default function App() {
       const total = (l * w * q * p).toFixed(2);
       
       if (l > 0 && w > 0) {
-        setFormData(prev => ({
+        setOrderFormData(prev => ({
           ...prev,
-          specs: `${l}m × ${w}m × ${q}件 (总面积: ${area}㎡)`,
+          specs: `${l}m × ${w}m × ${q}件 (面积: ${area}㎡)`,
           total_amount: total > 0 ? total : prev.total_amount
         }));
       }
     }
   }, [calcData, pricingMode]);
 
-  // 新建/保存订单
-  const handleSubmit = async (e) => {
+  // 保存订单
+  const handleOrderSubmit = async (e) => {
     e.preventDefault();
-    const total = parseFloat(formData.total_amount) || 0;
-    const deposit = parseFloat(formData.deposit_amount) || 0;
+    const total = parseFloat(orderFormData.total_amount) || 0;
+    const deposit = parseFloat(orderFormData.deposit_amount) || 0;
     const isPaid = deposit >= total && total > 0;
 
     const payload = {
-      ...formData,
+      ...orderFormData,
       total_amount: total,
       deposit_amount: deposit,
       payment_status: isPaid ? '已结清' : (deposit > 0 ? '部分付款' : '待结清')
@@ -142,9 +181,30 @@ export default function App() {
     if (error) {
       alert('保存失败: ' + error.message);
     } else {
-      setIsModalOpen(false);
-      resetForm();
-      fetchOrders();
+      setIsOrderModalOpen(false);
+      resetOrderForm();
+      fetchData();
+    }
+  };
+
+  // 保存支出
+  const handleExpenseSubmit = async (e) => {
+    e.preventDefault();
+    const amt = parseFloat(expenseFormData.amount) || 0;
+    if (amt <= 0) return alert('请输入有效的支出金额！');
+
+    const payload = {
+      ...expenseFormData,
+      amount: amt
+    };
+
+    const { error } = await supabase.from('expenses').insert([payload]);
+    if (error) {
+      alert('保存支出失败: ' + error.message);
+    } else {
+      setIsExpenseModalOpen(false);
+      resetExpenseForm();
+      fetchData();
     }
   };
 
@@ -155,32 +215,30 @@ export default function App() {
 
     const { error } = await supabase
       .from('orders')
-      .update({
-        deposit_amount: order.total_amount,
-        payment_status: '已结清'
-      })
+      .update({ deposit_amount: order.total_amount, payment_status: '已结清' })
       .eq('id', order.id);
 
-    if (error) {
-      alert('更新失败: ' + error.message);
-    } else {
-      fetchOrders();
-    }
+    if (error) alert('更新失败: ' + error.message);
+    else fetchData();
   };
 
-  // 删除订单
-  const handleDelete = async (id) => {
-    if (!window.confirm('确定要删除此条记录吗？')) return;
+  // 删除订单/支出
+  const handleDeleteOrder = async (id) => {
+    if (!window.confirm('确定要删除此条订单记录吗？')) return;
     const { error } = await supabase.from('orders').delete().eq('id', id);
-    if (error) {
-      alert('删除失败: ' + error.message);
-    } else {
-      fetchOrders();
-    }
+    if (error) alert('删除失败: ' + error.message);
+    else fetchData();
   };
 
-  const resetForm = () => {
-    setFormData({
+  const handleDeleteExpense = async (id) => {
+    if (!window.confirm('确定要删除此条支出记录吗？')) return;
+    const { error } = await supabase.from('expenses').delete().eq('id', id);
+    if (error) alert('删除失败: ' + error.message);
+    else fetchData();
+  };
+
+  const resetOrderForm = () => {
+    setOrderFormData({
       customer_name: '',
       phone: '',
       order_date: new Date().toISOString().split('T')[0],
@@ -195,17 +253,27 @@ export default function App() {
     setCalcData({ length: '', width: '', quantity: '1', unitPrice: '' });
   };
 
-  // 根据周期筛选
-  const currentPeriodOrders = orders.filter(item => {
-    if (!item.order_date) return false;
-    if (periodMode === 'year') {
-      return item.order_date.startsWith(selectedYear);
-    }
-    if (periodMode === 'month') {
-      return item.order_date.startsWith(selectedMonth);
-    }
+  const resetExpenseForm = () => {
+    setExpenseFormData({
+      expense_date: new Date().toISOString().split('T')[0],
+      category: '原材料进货',
+      amount: '',
+      payee: '',
+      payment_method: '微信支付',
+      notes: ''
+    });
+  };
+
+  // 周期过滤函数
+  const isInPeriod = (dateStr) => {
+    if (!dateStr) return false;
+    if (periodMode === 'year') return dateStr.startsWith(selectedYear);
+    if (periodMode === 'month') return dateStr.startsWith(selectedMonth);
     return true;
-  });
+  };
+
+  const currentPeriodOrders = orders.filter(item => isInPeriod(item.order_date));
+  const currentPeriodExpenses = expenses.filter(item => isInPeriod(item.expense_date));
 
   // 列表过滤
   const filteredOrders = currentPeriodOrders.filter(item => {
@@ -215,33 +283,76 @@ export default function App() {
     return matchSearch;
   });
 
-  // 看板核心统计计算
-  const stats = currentPeriodOrders.reduce((acc, curr) => {
-    const total = parseFloat(curr.total_amount) || 0;
-    const deposit = parseFloat(curr.deposit_amount) || 0;
-    const unpaid = Math.max(0, total - deposit);
+  const filteredExpenses = currentPeriodExpenses.filter(item => {
+    const matchSearch = (item.payee || '').includes(searchTerm) || (item.notes || '').includes(searchTerm);
+    if (expenseCatFilter !== '全部') return matchSearch && item.category === expenseCatFilter;
+    return matchSearch;
+  });
 
-    acc.totalAmount += total;
-    acc.receivedAmount += deposit;
-    acc.unpaidAmount += unpaid;
-    acc.count += 1;
-    return acc;
-  }, { totalAmount: 0, receivedAmount: 0, unpaidAmount: 0, count: 0 });
+  // 综合收支与净利润看板计算
+  const stats = {
+    totalRevenue: currentPeriodOrders.reduce((acc, curr) => acc + (parseFloat(curr.total_amount) || 0), 0),
+    receivedRevenue: currentPeriodOrders.reduce((acc, curr) => acc + (parseFloat(curr.deposit_amount) || 0), 0),
+    unpaidRevenue: currentPeriodOrders.reduce((acc, curr) => acc + Math.max(0, (parseFloat(curr.total_amount) || 0) - (parseFloat(curr.deposit_amount) || 0)), 0),
+    totalExpense: currentPeriodExpenses.reduce((acc, curr) => acc + (parseFloat(curr.amount) || 0), 0),
+    orderCount: currentPeriodOrders.length,
+    expenseCount: currentPeriodExpenses.length
+  };
 
-  // 周期标签
+  // 真实净利润 = 实收金额 - 总支出
+  const netProfit = stats.receivedRevenue - stats.totalExpense;
+
   const getPeriodLabel = () => {
     if (periodMode === 'month') return `${selectedMonth} 月度`;
     if (periodMode === 'year') return `${selectedYear} 年度`;
     return '全部历史';
   };
 
-  // 导出标准 Excel 格式 (.xls)
+  // 导出 Excel
   const exportToExcel = () => {
-    if (filteredOrders.length === 0) return alert('当前周期没有可导出的数据！');
+    let headers = [];
+    let rowsHtml = '';
+    let sheetName = '';
+    let fileName = '';
 
-    const headers = ['订单日期', '客户姓名', '联系电话', '品版材质', '规格/算料', '总金额(元)', '已付定金(元)', '待付尾款(元)', '交货状态', '结账状态', '备注'];
-    
-    let tableHtml = `
+    if (activeTab === 'income') {
+      if (filteredOrders.length === 0) return alert('当前周期无收入数据可导出！');
+      headers = ['订单日期', '客户姓名', '联系电话', '品版材质', '规格/算料', '总金额', '已收定金', '待付尾款', '交货状态', '结账状态', '备注'];
+      sheetName = '收入订单明细';
+      fileName = `蓓蓓广告_${getPeriodLabel()}_收入报表.xls`;
+      rowsHtml = filteredOrders.map(o => `
+        <tr>
+          <td>${o.order_date || ''}</td>
+          <td>${o.customer_name || ''}</td>
+          <td style="mso-number-format:'\\@';">${o.phone || ''}</td>
+          <td>${o.material || ''}</td>
+          <td>${o.specs || ''}</td>
+          <td style="text-align:right;">${parseFloat(o.total_amount || 0).toFixed(2)}</td>
+          <td style="text-align:right;">${parseFloat(o.deposit_amount || 0).toFixed(2)}</td>
+          <td style="text-align:right;">${(parseFloat(o.total_amount || 0) - parseFloat(o.deposit_amount || 0)).toFixed(2)}</td>
+          <td>${o.delivery_status || ''}</td>
+          <td>${o.payment_status || ''}</td>
+          <td>${o.notes || ''}</td>
+        </tr>
+      `).join('');
+    } else {
+      if (filteredExpenses.length === 0) return alert('当前周期无支出数据可导出！');
+      headers = ['支出日期', '支出分类', '支出金额(元)', '收款方/供应商/人员', '支付方式', '备注说明'];
+      sheetName = '公司支出明细';
+      fileName = `蓓蓓广告_${getPeriodLabel()}_支出报表.xls`;
+      rowsHtml = filteredExpenses.map(e => `
+        <tr>
+          <td>${e.expense_date || ''}</td>
+          <td>${e.category || ''}</td>
+          <td style="text-align:right;">${parseFloat(e.amount || 0).toFixed(2)}</td>
+          <td>${e.payee || ''}</td>
+          <td>${e.payment_method || ''}</td>
+          <td>${e.notes || ''}</td>
+        </tr>
+      `).join('');
+    }
+
+    const tableHtml = `
       <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
       <head>
         <meta http-equiv="content-type" content="application/vnd.ms-excel; charset=UTF-8">
@@ -250,7 +361,7 @@ export default function App() {
           <x:ExcelWorkbook>
             <x:ExcelWorksheets>
               <x:ExcelWorksheet>
-                <x:Name>${getPeriodLabel()}记账报表</x:Name>
+                <x:Name>${sheetName}</x:Name>
                 <x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
               </x:ExcelWorksheet>
             </x:ExcelWorksheets>
@@ -260,31 +371,12 @@ export default function App() {
         <style>
           th { background-color: #2563EB; color: #FFFFFF; font-weight: bold; border: 0.5pt solid #CBD5E1; text-align: center; }
           td { border: 0.5pt solid #E2E8F0; text-align: left; }
-          .num { text-align: right; }
         </style>
       </head>
       <body>
         <table>
-          <thead>
-            <tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr>
-          </thead>
-          <tbody>
-            ${filteredOrders.map(o => `
-              <tr>
-                <td>${o.order_date || ''}</td>
-                <td>${o.customer_name || ''}</td>
-                <td style="mso-number-format:'\\@';">${o.phone || ''}</td>
-                <td>${o.material || ''}</td>
-                <td>${o.specs || ''}</td>
-                <td class="num">${parseFloat(o.total_amount || 0).toFixed(2)}</td>
-                <td class="num">${parseFloat(o.deposit_amount || 0).toFixed(2)}</td>
-                <td class="num">${(parseFloat(o.total_amount || 0) - parseFloat(o.deposit_amount || 0)).toFixed(2)}</td>
-                <td>${o.delivery_status || ''}</td>
-                <td>${o.payment_status || ''}</td>
-                <td>${o.notes || ''}</td>
-              </tr>
-            `).join('')}
-          </tbody>
+          <thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+          <tbody>${rowsHtml}</tbody>
         </table>
       </body>
       </html>
@@ -294,7 +386,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `蓓蓓广告记账_${getPeriodLabel()}_报表.xls`;
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -360,10 +452,10 @@ export default function App() {
     );
   }
 
-  // 2. 主系统面板
+  // 2. 已登录主系统界面
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 p-4 md:p-8">
-      <div className="max-w-7xl mx-auto space-y-6">
+    <div className="min-h-screen bg-slate-50 text-slate-800 p-3 md:p-8">
+      <div className="max-w-7xl mx-auto space-y-5">
         
         {/* 顶部标题栏 */}
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center bg-white p-5 rounded-2xl shadow-sm border border-slate-100 gap-4">
@@ -375,21 +467,45 @@ export default function App() {
               <h1 className="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">
                 临汾市尧都区蓓蓓图文广告有限公司记账管理系统
               </h1>
-              <p className="text-xs md:text-sm text-slate-500 mt-0.5">专业广告制作 · 月度/年度营收汇总 · 资金尾款追踪</p>
+              <p className="text-xs md:text-sm text-slate-500 mt-0.5">收入开单 · 采购支出 · 净利润核算 · 隐私保护</p>
             </div>
           </div>
           
-          <div className="flex items-center space-x-3 w-full md:w-auto">
+          <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
+            {/* 小眼睛金额隐私开关 */}
             <button 
-              onClick={() => { resetForm(); setIsModalOpen(true); }}
-              className="flex-1 md:flex-none px-5 py-2.5 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-medium rounded-xl shadow-md shadow-blue-600/20 transition-all flex items-center justify-center space-x-2"
+              onClick={toggleAmountVisibility}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 border ${
+                showAmount 
+                  ? 'bg-amber-50 text-amber-700 border-amber-200 shadow-sm' 
+                  : 'bg-slate-100 text-slate-600 border-slate-200'
+              }`}
+              title={showAmount ? '点击隐藏敏感金额' : '点击显示明文金额'}
             >
-              <span className="text-lg">+</span>
-              <span>新建订单</span>
+              <span>{showAmount ? '👁️' : '🙈'}</span>
+              <span>{showAmount ? '金额已显示' : '金额已隐蔽'}</span>
             </button>
+
+            {/* 新建订单 */}
+            <button 
+              onClick={() => { resetOrderForm(); setIsOrderModalOpen(true); }}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs md:text-sm font-bold rounded-xl shadow-md shadow-blue-600/20 transition-all flex items-center space-x-1"
+            >
+              <span>+ 记收入</span>
+            </button>
+
+            {/* 新建支出 */}
+            <button 
+              onClick={() => { resetExpenseForm(); setIsExpenseModalOpen(true); }}
+              className="px-4 py-2 bg-rose-600 hover:bg-rose-700 active:scale-95 text-white text-xs md:text-sm font-bold rounded-xl shadow-md shadow-rose-600/20 transition-all flex items-center space-x-1"
+            >
+              <span>- 记支出</span>
+            </button>
+
+            {/* 退出登录 */}
             <button 
               onClick={handleLogout}
-              className="px-3.5 py-2.5 border border-slate-200 hover:bg-rose-50 hover:text-rose-600 text-slate-500 font-medium rounded-xl transition-all text-sm"
+              className="px-3 py-2 border border-slate-200 hover:bg-slate-100 text-slate-500 font-medium rounded-xl transition-all text-xs"
               title="退出登录"
             >
               退出
@@ -397,12 +513,12 @@ export default function App() {
           </div>
         </header>
 
-        {/* 账目周期与月度看板 */}
-        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-5">
+        {/* 周期切换与收支/净利润综合看板 */}
+        <section className="bg-white p-5 md:p-6 rounded-2xl shadow-sm border border-slate-100 space-y-5">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pb-4 border-b border-slate-100">
             <div>
-              <h2 className="text-base font-bold text-slate-800">账目周期概览</h2>
-              <p className="text-xs text-slate-500">当前查看维度：<span className="font-semibold text-blue-600">{getPeriodLabel()}</span></p>
+              <h2 className="text-base font-bold text-slate-800">经营看板与周期统计</h2>
+              <p className="text-xs text-slate-500">统计维度：<span className="font-semibold text-blue-600">{getPeriodLabel()}</span></p>
             </div>
             
             <div className="flex flex-wrap items-center gap-2">
@@ -427,7 +543,6 @@ export default function App() {
                 </button>
               </div>
 
-              {/* 月份选择器 */}
               {periodMode === 'month' && (
                 <input 
                   type="month" 
@@ -437,7 +552,6 @@ export default function App() {
                 />
               )}
 
-              {/* 年份选择器 */}
               {periodMode === 'year' && (
                 <select 
                   value={selectedYear} 
@@ -452,193 +566,297 @@ export default function App() {
             </div>
           </div>
 
-          {/* 数据看板卡片 */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {/* 核心看板卡片（含受保护的净利润与支出） */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* 营业总额 / 实收 */}
             <div className="p-4 rounded-xl bg-blue-50/50 border border-blue-100/60">
               <span className="text-xs font-semibold text-blue-600 uppercase tracking-wider">
-                {periodMode === 'month' ? `${selectedMonth} 营业额` : '总营业额'}
+                {periodMode === 'month' ? '本月营业总额' : '周期营业总额'}
               </span>
-              <div className="text-xl md:text-2xl font-bold text-slate-900 mt-1">¥{stats.totalAmount.toFixed(2)}</div>
-              <span className="text-xs text-slate-500 mt-1 block">{getPeriodLabel()} 订单金额合计</span>
+              <div className="text-xl md:text-2xl font-black text-slate-900 mt-1">
+                {formatMoney(stats.totalRevenue)}
+              </div>
+              <span className="text-[11px] text-slate-500 mt-1 block">
+                实收到账: <strong className="text-emerald-600">{formatMoney(stats.receivedRevenue)}</strong>
+              </span>
             </div>
             
-            <div className="p-4 rounded-xl bg-emerald-50/50 border border-emerald-100/60">
-              <span className="text-xs font-semibold text-emerald-600 uppercase tracking-wider">
-                {periodMode === 'month' ? '已实收金额' : '已收金额/定金'}
-              </span>
-              <div className="text-xl md:text-2xl font-bold text-emerald-600 mt-1">¥{stats.receivedAmount.toFixed(2)}</div>
-              <span className="text-xs text-slate-500 mt-1 block">实收资金到账汇总</span>
-            </div>
-
+            {/* 公司总支出 */}
             <div className="p-4 rounded-xl bg-rose-50/50 border border-rose-100/60">
               <span className="text-xs font-semibold text-rose-600 uppercase tracking-wider">
-                {periodMode === 'month' ? '待收尾款(欠款)' : '累计待收尾款'}
+                {periodMode === 'month' ? '本月总开支' : '周期公司总支出'}
               </span>
-              <div className="text-xl md:text-2xl font-bold text-rose-600 mt-1">¥{stats.unpaidAmount.toFixed(2)}</div>
-              <span className="text-xs text-slate-500 mt-1 block">未结清挂账总计</span>
+              <div className="text-xl md:text-2xl font-black text-rose-600 mt-1">
+                {formatMoney(stats.totalExpense)}
+              </div>
+              <span className="text-[11px] text-slate-500 mt-1 block">
+                进货/外协/人工/房租 ({stats.expenseCount} 笔)
+              </span>
             </div>
 
-            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/60">
-              <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                {periodMode === 'month' ? '本月订单量' : '订单总数'}
+            {/* 真实净利润 */}
+            <div className={`p-4 rounded-xl border ${netProfit >= 0 ? 'bg-emerald-50/60 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+              <span className={`text-xs font-bold uppercase tracking-wider ${netProfit >= 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                {periodMode === 'month' ? '本月实际净利润' : '周期实际净利润'}
               </span>
-              <div className="text-xl md:text-2xl font-bold text-slate-800 mt-1">{stats.count} 笔</div>
-              <span className="text-xs text-slate-500 mt-1 block">当前周期总单数</span>
+              <div className={`text-xl md:text-2xl font-black mt-1 ${netProfit >= 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                {formatMoney(netProfit)}
+              </div>
+              <span className="text-[11px] text-slate-500 mt-1 block">
+                计算公式: 实收 - 总支出
+              </span>
+            </div>
+
+            {/* 客户欠款挂账 */}
+            <div className="p-4 rounded-xl bg-amber-50/40 border border-amber-200/60">
+              <span className="text-xs font-semibold text-amber-700 uppercase tracking-wider">
+                待收客户尾款 (欠款)
+              </span>
+              <div className="text-xl md:text-2xl font-black text-amber-600 mt-1">
+                {formatMoney(stats.unpaidRevenue)}
+              </div>
+              <span className="text-[11px] text-slate-500 mt-1 block">未收回订单挂账汇总</span>
             </div>
           </div>
         </section>
 
-        {/* 订单明细管理 */}
+        {/* 收入与支出主Tab切换区 */}
         <section className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-          <div className="p-5 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-            <div>
-              <h2 className="text-lg font-bold text-slate-800">订单明细列表</h2>
-              <span className="text-xs text-slate-500">{getPeriodLabel()} · 共 {filteredOrders.length} 条记录</span>
+          {/* Tab 头部 */}
+          <div className="p-4 md:p-5 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-slate-50/30">
+            <div className="flex items-center space-x-2 bg-slate-200/70 p-1 rounded-xl">
+              <button 
+                onClick={() => { setActiveTab('income'); setSearchTerm(''); }}
+                className={`px-4 py-2 rounded-lg text-xs md:text-sm font-bold transition-all flex items-center space-x-1.5 ${
+                  activeTab === 'income' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <span>📦 客户订单收入 ({filteredOrders.length})</span>
+              </button>
+              <button 
+                onClick={() => { setActiveTab('expense'); setSearchTerm(''); }}
+                className={`px-4 py-2 rounded-lg text-xs md:text-sm font-bold transition-all flex items-center space-x-1.5 ${
+                  activeTab === 'expense' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <span>💸 公司采购与支出 ({filteredExpenses.length})</span>
+              </button>
             </div>
             
-            <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+            <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
               <input 
                 type="text" 
-                placeholder="搜索客户姓名或手机号..." 
+                placeholder={activeTab === 'income' ? "搜索客户姓名或手机..." : "搜索收款方、备注..."}
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm w-full md:w-56 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs md:text-sm w-full md:w-52 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               />
-              <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-medium">
-                {['全部', '待结清', '已结清'].map((st) => (
-                  <button 
-                    key={st}
-                    onClick={() => setStatusFilter(st)}
-                    className={`px-3 py-1.5 rounded-md transition-all ${statusFilter === st ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'}`}
-                  >
-                    {st}
-                  </button>
-                ))}
-              </div>
+
+              {activeTab === 'income' ? (
+                <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-medium">
+                  {['全部', '待结清', '已结清'].map((st) => (
+                    <button 
+                      key={st}
+                      onClick={() => setStatusFilter(st)}
+                      className={`px-2.5 py-1.5 rounded-md transition-all ${statusFilter === st ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'}`}
+                    >
+                      {st}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <select 
+                  value={expenseCatFilter}
+                  onChange={(e) => setExpenseCatFilter(e.target.value)}
+                  className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-medium bg-white focus:outline-none"
+                >
+                  <option value="全部">全部类别</option>
+                  {EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
+
               <button 
                 onClick={exportToExcel}
-                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center space-x-1.5 shadow-sm shadow-emerald-600/20"
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs md:text-sm font-semibold rounded-lg transition-colors flex items-center space-x-1 shadow-sm"
               >
-                <span>📊 导出 Excel 表格</span>
+                <span>📊 导出当前 Excel</span>
               </button>
             </div>
           </div>
 
-          {/* 表格 */}
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50/75 text-slate-500 text-xs font-semibold uppercase tracking-wider border-b border-slate-100">
-                <tr>
-                  <th className="p-4">订单日期</th>
-                  <th className="p-4">客户姓名</th>
-                  <th className="p-4">联系电话</th>
-                  <th className="p-4">品版材质</th>
-                  <th className="p-4">规格 / 算料</th>
-                  <th className="p-4">总金额</th>
-                  <th className="p-4">已付定金</th>
-                  <th className="p-4">待付尾款</th>
-                  <th className="p-4">交货状态</th>
-                  <th className="p-4">结账状态</th>
-                  <th className="p-4 text-center">操作</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {loading ? (
-                  <tr><td colSpan="11" className="p-8 text-center text-slate-400">正在同步数据中...</td></tr>
-                ) : filteredOrders.length === 0 ? (
-                  <tr><td colSpan="11" className="p-8 text-center text-slate-400">当前周期暂无订单记录</td></tr>
-                ) : (
-                  filteredOrders.map((order) => {
-                    const unpaid = Math.max(0, order.total_amount - order.deposit_amount);
-                    return (
-                      <tr key={order.id} className="hover:bg-slate-50/60 transition-colors">
-                        <td className="p-4 text-slate-600 whitespace-nowrap">{order.order_date}</td>
-                        <td className="p-4 font-semibold text-slate-900 whitespace-nowrap">{order.customer_name}</td>
-                        <td className="p-4 text-slate-500 whitespace-nowrap">{order.phone || '-'}</td>
-                        <td className="p-4 whitespace-nowrap">
-                          <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-md text-xs font-medium">
-                            {order.material}
-                          </span>
-                        </td>
-                        <td className="p-4 text-slate-600 max-w-xs truncate" title={order.specs}>{order.specs || '-'}</td>
-                        <td className="p-4 font-bold text-slate-900 whitespace-nowrap">¥{parseFloat(order.total_amount).toFixed(2)}</td>
-                        <td className="p-4 text-emerald-600 font-medium whitespace-nowrap">¥{parseFloat(order.deposit_amount).toFixed(2)}</td>
-                        <td className="p-4 whitespace-nowrap">
-                          {unpaid > 0 ? (
-                            <span className="font-bold text-rose-600">¥{unpaid.toFixed(2)}</span>
-                          ) : (
-                            <span className="text-slate-400">¥0.00</span>
-                          )}
-                        </td>
-                        <td className="p-4 whitespace-nowrap">
-                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                            order.delivery_status === '已交货' || order.delivery_status === '已安装' 
-                              ? 'bg-emerald-50 text-emerald-700' 
-                              : 'bg-blue-50 text-blue-700'
-                          }`}>
-                            {order.delivery_status || '制作中'}
-                          </span>
-                        </td>
-                        <td className="p-4 whitespace-nowrap">
-                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                            order.payment_status === '已结清'
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
-                              : 'bg-rose-50 text-rose-700 border border-rose-200'
-                          }`}>
-                            {order.payment_status}
-                          </span>
-                        </td>
-                        <td className="p-4 text-center whitespace-nowrap space-x-2">
-                          {unpaid > 0 && (
+          {/* 表格区：收入明细表格 */}
+          {activeTab === 'income' && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50/75 text-slate-500 text-xs font-semibold uppercase tracking-wider border-b border-slate-100">
+                  <tr>
+                    <th className="p-4">订单日期</th>
+                    <th className="p-4">客户姓名</th>
+                    <th className="p-4">联系电话</th>
+                    <th className="p-4">品版材质</th>
+                    <th className="p-4">规格 / 算料</th>
+                    <th className="p-4">总金额</th>
+                    <th className="p-4">已付定金</th>
+                    <th className="p-4">待付尾款</th>
+                    <th className="p-4">交货状态</th>
+                    <th className="p-4">结账状态</th>
+                    <th className="p-4 text-center">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {loading ? (
+                    <tr><td colSpan="11" className="p-8 text-center text-slate-400">正在同步数据中...</td></tr>
+                  ) : filteredOrders.length === 0 ? (
+                    <tr><td colSpan="11" className="p-8 text-center text-slate-400">当前周期暂无订单记录</td></tr>
+                  ) : (
+                    filteredOrders.map((order) => {
+                      const unpaid = Math.max(0, order.total_amount - order.deposit_amount);
+                      return (
+                        <tr key={order.id} className="hover:bg-slate-50/60 transition-colors">
+                          <td className="p-4 text-slate-600 whitespace-nowrap">{order.order_date}</td>
+                          <td className="p-4 font-semibold text-slate-900 whitespace-nowrap">{order.customer_name}</td>
+                          <td className="p-4 text-slate-500 whitespace-nowrap">{order.phone || '-'}</td>
+                          <td className="p-4 whitespace-nowrap">
+                            <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-md text-xs font-medium">
+                              {order.material}
+                            </span>
+                          </td>
+                          <td className="p-4 text-slate-600 max-w-xs truncate" title={order.specs}>{order.specs || '-'}</td>
+                          <td className="p-4 font-bold text-slate-900 whitespace-nowrap">{formatMoney(order.total_amount)}</td>
+                          <td className="p-4 text-emerald-600 font-medium whitespace-nowrap">{formatMoney(order.deposit_amount)}</td>
+                          <td className="p-4 whitespace-nowrap">
+                            {unpaid > 0 ? (
+                              <span className="font-bold text-rose-600">{formatMoney(unpaid)}</span>
+                            ) : (
+                              <span className="text-slate-400">{formatMoney(0)}</span>
+                            )}
+                          </td>
+                          <td className="p-4 whitespace-nowrap">
+                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                              order.delivery_status === '已交货' || order.delivery_status === '已安装' 
+                                ? 'bg-emerald-50 text-emerald-700' 
+                                : 'bg-blue-50 text-blue-700'
+                            }`}>
+                              {order.delivery_status || '制作中'}
+                            </span>
+                          </td>
+                          <td className="p-4 whitespace-nowrap">
+                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                              order.payment_status === '已结清'
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                                : 'bg-rose-50 text-rose-700 border border-rose-200'
+                            }`}>
+                              {order.payment_status}
+                            </span>
+                          </td>
+                          <td className="p-4 text-center whitespace-nowrap space-x-2">
+                            {unpaid > 0 && (
+                              <button 
+                                onClick={() => handleQuickSettle(order)}
+                                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-medium transition-colors"
+                              >
+                                收尾款
+                              </button>
+                            )}
                             <button 
-                              onClick={() => handleQuickSettle(order)}
-                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-medium transition-colors"
+                              onClick={() => setStatementCustomer(order.customer_name)}
+                              className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-medium transition-colors"
                             >
-                              收尾款
+                              对账
                             </button>
-                          )}
+                            <button 
+                              onClick={() => handleDeleteOrder(order.id)}
+                              className="text-slate-400 hover:text-rose-600 text-xs transition-colors"
+                            >
+                              删除
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* 表格区：支出明细表格 */}
+          {activeTab === 'expense' && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-rose-50/60 text-rose-800 text-xs font-semibold uppercase tracking-wider border-b border-rose-100">
+                  <tr>
+                    <th className="p-4">支出日期</th>
+                    <th className="p-4">支出分类</th>
+                    <th className="p-4">支出金额</th>
+                    <th className="p-4">收款方 / 供应商 / 人员</th>
+                    <th className="p-4">支付方式</th>
+                    <th className="p-4">备注说明</th>
+                    <th className="p-4 text-center">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {loading ? (
+                    <tr><td colSpan="7" className="p-8 text-center text-slate-400">正在同步数据中...</td></tr>
+                  ) : filteredExpenses.length === 0 ? (
+                    <tr><td colSpan="7" className="p-8 text-center text-slate-400">当前周期暂无支出记录</td></tr>
+                  ) : (
+                    filteredExpenses.map((exp) => (
+                      <tr key={exp.id} className="hover:bg-rose-50/20 transition-colors">
+                        <td className="p-4 text-slate-600 whitespace-nowrap">{exp.expense_date}</td>
+                        <td className="p-4 whitespace-nowrap">
+                          <span className="px-2.5 py-1 bg-rose-50 text-rose-700 rounded-md text-xs font-bold border border-rose-100">
+                            {exp.category}
+                          </span>
+                        </td>
+                        <td className="p-4 font-extrabold text-rose-600 whitespace-nowrap text-base">
+                          {formatMoney(exp.amount)}
+                        </td>
+                        <td className="p-4 font-semibold text-slate-800 whitespace-nowrap">{exp.payee || '-'}</td>
+                        <td className="p-4 text-slate-600 whitespace-nowrap">
+                          <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded text-xs">
+                            {exp.payment_method || '微信支付'}
+                          </span>
+                        </td>
+                        <td className="p-4 text-slate-600 max-w-sm truncate" title={exp.notes}>{exp.notes || '-'}</td>
+                        <td className="p-4 text-center whitespace-nowrap">
                           <button 
-                            onClick={() => setStatementCustomer(order.customer_name)}
-                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-medium transition-colors"
-                          >
-                            对账
-                          </button>
-                          <button 
-                            onClick={() => handleDelete(order.id)}
+                            onClick={() => handleDeleteExpense(exp.id)}
                             className="text-slate-400 hover:text-rose-600 text-xs transition-colors"
                           >
                             删除
                           </button>
                         </td>
                       </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
         </section>
 
       </div>
 
       {/* 新建订单弹窗 (Modal) */}
-      {isModalOpen && (
+      {isOrderModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
           <div className="bg-white w-full max-w-xl rounded-2xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[90vh]">
             <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-              <h3 className="font-bold text-slate-800 text-lg">新建记账订单</h3>
-              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+              <h3 className="font-bold text-slate-800 text-lg">新建记账订单 (收入)</h3>
+              <button onClick={() => setIsOrderModalOpen(false)} className="text-slate-400 hover:text-slate-600 text-xl">✕</button>
             </div>
             
-            <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto">
+            <form onSubmit={handleOrderSubmit} className="p-6 space-y-4 overflow-y-auto">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="text-xs font-bold text-slate-700 mb-1 block">客户姓名 *</label>
                   <input 
                     required 
                     type="text" 
-                    value={formData.customer_name}
-                    onChange={(e) => setFormData({...formData, customer_name: e.target.value})}
+                    value={orderFormData.customer_name}
+                    onChange={(e) => setOrderFormData({...orderFormData, customer_name: e.target.value})}
                     placeholder="请输入客户姓名" 
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
@@ -647,8 +865,8 @@ export default function App() {
                   <label className="text-xs font-bold text-slate-700 mb-1 block">联系电话</label>
                   <input 
                     type="text" 
-                    value={formData.phone}
-                    onChange={(e) => setFormData({...formData, phone: e.target.value})}
+                    value={orderFormData.phone}
+                    onChange={(e) => setOrderFormData({...orderFormData, phone: e.target.value})}
                     placeholder="手机号 (可选)" 
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
@@ -661,16 +879,16 @@ export default function App() {
                   <input 
                     required 
                     type="date" 
-                    value={formData.order_date}
-                    onChange={(e) => setFormData({...formData, order_date: e.target.value})}
+                    value={orderFormData.order_date}
+                    onChange={(e) => setOrderFormData({...orderFormData, order_date: e.target.value})}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
                 </div>
                 <div>
                   <label className="text-xs font-bold text-slate-700 mb-1 block">品版材质</label>
                   <select 
-                    value={formData.material}
-                    onChange={(e) => setFormData({...formData, material: e.target.value})}
+                    value={orderFormData.material}
+                    onChange={(e) => setOrderFormData({...orderFormData, material: e.target.value})}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white"
                   >
                     {AD_MATERIALS.map(m => <option key={m} value={m}>{m}</option>)}
@@ -678,7 +896,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 算料计算器区块 */}
+              {/* 算料计算器 */}
               <div className="p-3.5 bg-blue-50/60 rounded-xl border border-blue-100 space-y-3">
                 <div className="flex justify-between items-center">
                   <span className="text-xs font-bold text-blue-900">广告计价与算料模式</span>
@@ -746,8 +964,8 @@ export default function App() {
                 <label className="text-xs font-bold text-slate-700 mb-1 block">规格说明</label>
                 <input 
                   type="text" 
-                  value={formData.specs}
-                  onChange={(e) => setFormData({...formData, specs: e.target.value})}
+                  value={orderFormData.specs}
+                  onChange={(e) => setOrderFormData({...orderFormData, specs: e.target.value})}
                   placeholder="例如: 3m × 2m = 6㎡, 包边打孔" 
                   className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
@@ -759,8 +977,8 @@ export default function App() {
                   <input 
                     required 
                     type="number" step="0.01"
-                    value={formData.total_amount}
-                    onChange={(e) => setFormData({...formData, total_amount: e.target.value})}
+                    value={orderFormData.total_amount}
+                    onChange={(e) => setOrderFormData({...orderFormData, total_amount: e.target.value})}
                     placeholder="0.00" 
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
@@ -769,8 +987,8 @@ export default function App() {
                   <label className="text-xs font-bold text-slate-700 mb-1 block">已付定金 (元)</label>
                   <input 
                     type="number" step="0.01"
-                    value={formData.deposit_amount}
-                    onChange={(e) => setFormData({...formData, deposit_amount: e.target.value})}
+                    value={orderFormData.deposit_amount}
+                    onChange={(e) => setOrderFormData({...orderFormData, deposit_amount: e.target.value})}
                     placeholder="0.00" 
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm text-emerald-600 font-bold focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
@@ -778,7 +996,7 @@ export default function App() {
                 <div>
                   <label className="text-xs font-bold text-slate-700 mb-1 block">剩余尾款</label>
                   <div className="w-full px-3 py-2 bg-slate-100 rounded-lg text-sm font-bold text-rose-600">
-                    ¥{Math.max(0, (parseFloat(formData.total_amount) || 0) - (parseFloat(formData.deposit_amount) || 0)).toFixed(2)}
+                    ¥{Math.max(0, (parseFloat(orderFormData.total_amount) || 0) - (parseFloat(orderFormData.deposit_amount) || 0)).toFixed(2)}
                   </div>
                 </div>
               </div>
@@ -787,9 +1005,9 @@ export default function App() {
                 <label className="text-xs font-bold text-slate-700 mb-1 block">订单备注</label>
                 <textarea 
                   rows="2"
-                  value={formData.notes}
-                  onChange={(e) => setFormData({...formData, notes: e.target.value})}
-                  placeholder="交货地点、开票需求、特殊工艺等..." 
+                  value={orderFormData.notes}
+                  onChange={(e) => setOrderFormData({...orderFormData, notes: e.target.value})}
+                  placeholder="交货地点、特殊工艺等..." 
                   className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
               </div>
@@ -797,7 +1015,7 @@ export default function App() {
               <div className="pt-2 flex justify-end space-x-3">
                 <button 
                   type="button" 
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => setIsOrderModalOpen(false)}
                   className="px-4 py-2 border border-slate-200 text-slate-600 rounded-xl text-sm font-medium hover:bg-slate-50"
                 >
                   取消
@@ -807,6 +1025,105 @@ export default function App() {
                   className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium shadow-md shadow-blue-600/20"
                 >
                   保存记录
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 新建支出弹窗 (Modal) */}
+      {isExpenseModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
+          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-rose-50/50">
+              <h3 className="font-bold text-rose-900 text-lg">记一笔公司支出</h3>
+              <button onClick={() => setIsExpenseModalOpen(false)} className="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+            </div>
+            
+            <form onSubmit={handleExpenseSubmit} className="p-6 space-y-4 overflow-y-auto">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 mb-1 block">支出日期 *</label>
+                  <input 
+                    required 
+                    type="date" 
+                    value={expenseFormData.expense_date}
+                    onChange={(e) => setExpenseFormData({...expenseFormData, expense_date: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-rose-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700 mb-1 block">支出类别 *</label>
+                  <select 
+                    value={expenseFormData.category}
+                    onChange={(e) => setExpenseFormData({...expenseFormData, category: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-rose-500 focus:outline-none bg-white font-medium"
+                  >
+                    {EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 mb-1 block">支出金额 (元) *</label>
+                  <input 
+                    required 
+                    type="number" step="0.01"
+                    placeholder="0.00"
+                    value={expenseFormData.amount}
+                    onChange={(e) => setExpenseFormData({...expenseFormData, amount: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold text-rose-600 focus:ring-2 focus:ring-rose-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700 mb-1 block">支付方式</label>
+                  <select 
+                    value={expenseFormData.payment_method}
+                    onChange={(e) => setExpenseFormData({...expenseFormData, payment_method: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-rose-500 focus:outline-none bg-white"
+                  >
+                    {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-700 mb-1 block">收款方 / 供应商 / 人员</label>
+                <input 
+                  type="text" 
+                  placeholder="如：板材厂、顺丰速运、安装师傅等"
+                  value={expenseFormData.payee}
+                  onChange={(e) => setExpenseFormData({...expenseFormData, payee: e.target.value})}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-rose-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-700 mb-1 block">备注说明</label>
+                <textarea 
+                  rows="2"
+                  placeholder="如：采购5卷写真背胶、8月份房租、2台机器维护等..."
+                  value={expenseFormData.notes}
+                  onChange={(e) => setExpenseFormData({...expenseFormData, notes: e.target.value})}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-rose-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end space-x-3">
+                <button 
+                  type="button" 
+                  onClick={() => setIsExpenseModalOpen(false)}
+                  className="px-4 py-2 border border-slate-200 text-slate-600 rounded-xl text-sm font-medium hover:bg-slate-50"
+                >
+                  取消
+                </button>
+                <button 
+                  type="submit" 
+                  className="px-6 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-sm font-medium shadow-md shadow-rose-600/20"
+                >
+                  保存支出
                 </button>
               </div>
             </form>
@@ -845,8 +1162,8 @@ export default function App() {
                           <div className="text-slate-500">{o.specs || '无特殊规格'}</div>
                         </div>
                         <div className="text-right">
-                          <div className="font-bold text-slate-800">¥{o.total_amount}</div>
-                          <div className="text-rose-600">欠: ¥{(o.total_amount - o.deposit_amount).toFixed(2)}</div>
+                          <div className="font-bold text-slate-800">{formatMoney(o.total_amount)}</div>
+                          <div className="text-rose-600">欠: {formatMoney(o.total_amount - o.deposit_amount)}</div>
                         </div>
                       </div>
                     ))}
@@ -854,7 +1171,7 @@ export default function App() {
 
                   <div className="p-4 bg-rose-50/60 rounded-xl border border-rose-100 flex justify-between items-center">
                     <span className="text-sm font-bold text-slate-700">累计待付欠款</span>
-                    <span className="text-xl font-extrabold text-rose-600">¥{unpaidSum.toFixed(2)}</span>
+                    <span className="text-xl font-extrabold text-rose-600">{formatMoney(unpaidSum)}</span>
                   </div>
 
                   <div className="flex space-x-3 pt-2">
