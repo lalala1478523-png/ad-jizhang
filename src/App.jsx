@@ -11,8 +11,11 @@ export default function App() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   
-  // 筛选与周期
+  // 筛选与统计周期模式：'month' (按月) | 'year' (按年/年初到年末) | 'all' (全部历史)
+  const [periodMode, setPeriodMode] = useState('year'); 
+  const [selectedYear, setSelectedYear] = useState('2026');
   const [selectedMonth, setSelectedMonth] = useState('2026-08');
+  
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('全部'); // 全部 | 待结清 | 已结清
 
@@ -103,7 +106,8 @@ export default function App() {
 
   // 快捷收尾款
   const handleQuickSettle = async (order) => {
-    if (!window.confirm(`确认结清客户【${order.customer_name}】的剩余尾款 ¥${(order.total_amount - order.deposit_amount).toFixed(2)} 吗？`)) return;
+    const unpaid = order.total_amount - order.deposit_amount;
+    if (!window.confirm(`确认结清客户【${order.customer_name}】的剩余尾款 ¥${unpaid.toFixed(2)} 吗？`)) return;
 
     const { error } = await supabase
       .from('orders')
@@ -147,22 +151,28 @@ export default function App() {
     setCalcData({ length: '', width: '', quantity: '1', unitPrice: '' });
   };
 
-  // 筛选当月/选定周期订单
-  const currentMonthOrders = orders.filter(item => {
+  // 根据周期模式（按年/按月/全部）筛选订单
+  const currentPeriodOrders = orders.filter(item => {
     if (!item.order_date) return false;
-    return item.order_date.startsWith(selectedMonth);
+    if (periodMode === 'year') {
+      return item.order_date.startsWith(selectedYear); // 年初到年末（如 2026-01-01 到 2026-12-31）
+    }
+    if (periodMode === 'month') {
+      return item.order_date.startsWith(selectedMonth); // 指定单月
+    }
+    return true; // 全部历史
   });
 
-  // 筛选表格列表显示的数据
-  const filteredOrders = currentMonthOrders.filter(item => {
+  // 列表过滤（搜索词 + 结账状态）
+  const filteredOrders = currentPeriodOrders.filter(item => {
     const matchSearch = (item.customer_name || '').includes(searchTerm) || (item.phone || '').includes(searchTerm);
     if (statusFilter === '待结清') return matchSearch && item.payment_status !== '已结清';
     if (statusFilter === '已结清') return matchSearch && item.payment_status === '已结清';
     return matchSearch;
   });
 
-  // 看板统计计算
-  const stats = currentMonthOrders.reduce((acc, curr) => {
+  // 看板核心统计计算
+  const stats = currentPeriodOrders.reduce((acc, curr) => {
     const total = parseFloat(curr.total_amount) || 0;
     const deposit = parseFloat(curr.deposit_amount) || 0;
     const unpaid = Math.max(0, total - deposit);
@@ -174,9 +184,16 @@ export default function App() {
     return acc;
   }, { totalAmount: 0, receivedAmount: 0, unpaidAmount: 0, count: 0 });
 
+  // 周期文案生成
+  const getPeriodLabel = () => {
+    if (periodMode === 'year') return `${selectedYear}年度（年初至年末）`;
+    if (periodMode === 'month') return `${selectedMonth} 单月`;
+    return '全部历史累计';
+  };
+
   // 导出 CSV (Excel兼容)
   const exportToCSV = () => {
-    if (filteredOrders.length === 0) return alert('当前没有可导出的数据！');
+    if (filteredOrders.length === 0) return alert('当前周期没有可导出的数据！');
     const headers = ['订单日期,客户姓名,联系电话,品版材质,规格数量,总金额,已收金额,待付尾款,交货状态,结账状态,备注'];
     const rows = filteredOrders.map(o => [
       o.order_date,
@@ -196,7 +213,7 @@ export default function App() {
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `蓓蓓广告记账_${selectedMonth}.csv`);
+    link.setAttribute('download', `蓓蓓广告记账_${getPeriodLabel()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -216,7 +233,7 @@ export default function App() {
               <h1 className="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">
                 临汾市尧都区蓓蓓图文广告有限公司记账管理系统
               </h1>
-              <p className="text-xs md:text-sm text-slate-500 mt-0.5">专业广告制作 · 订单跟踪 · 资金尾款 · 历史账目一目了然</p>
+              <p className="text-xs md:text-sm text-slate-500 mt-0.5">专业广告制作 · 年度/月度营收汇总 · 资金尾款追踪</p>
             </div>
           </div>
           <button 
@@ -228,43 +245,94 @@ export default function App() {
           </button>
         </header>
 
-        {/* 周期切换与数据看板 */}
+        {/* 账目周期切换与年度看板 */}
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-5">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pb-4 border-b border-slate-100">
             <div>
               <h2 className="text-base font-bold text-slate-800">账目周期概览</h2>
-              <p className="text-xs text-slate-500">当前查看：<span className="font-semibold text-blue-600">{selectedMonth}</span></p>
+              <p className="text-xs text-slate-500">当前统计维度：<span className="font-semibold text-blue-600">{getPeriodLabel()}</span></p>
             </div>
-            <div className="flex items-center space-x-2">
-              <input 
-                type="month" 
-                value={selectedMonth} 
-                onChange={(e) => setSelectedMonth(e.target.value)}
-                className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium"
-              />
+            
+            <div className="flex flex-wrap items-center gap-2">
+              {/* 模式选择按钮 */}
+              <div className="flex bg-slate-100 p-1 rounded-lg text-xs font-semibold">
+                <button 
+                  onClick={() => setPeriodMode('year')}
+                  className={`px-3 py-1.5 rounded-md transition-all ${periodMode === 'year' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'}`}
+                >
+                  📅 按年汇总(年初到年末)
+                </button>
+                <button 
+                  onClick={() => setPeriodMode('month')}
+                  className={`px-3 py-1.5 rounded-md transition-all ${periodMode === 'month' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'}`}
+                >
+                  🗓️ 按单月查看
+                </button>
+                <button 
+                  onClick={() => setPeriodMode('all')}
+                  className={`px-3 py-1.5 rounded-md transition-all ${periodMode === 'all' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'}`}
+                >
+                  🌐 全部历史
+                </button>
+              </div>
+
+              {/* 年份选择器 */}
+              {periodMode === 'year' && (
+                <select 
+                  value={selectedYear} 
+                  onChange={(e) => setSelectedYear(e.target.value)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm bg-slate-50 font-bold text-blue-600 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                >
+                  {['2024', '2025', '2026', '2027', '2028'].map(y => (
+                    <option key={y} value={y}>{y}年度 (1月-12月)</option>
+                  ))}
+                </select>
+              )}
+
+              {/* 月份选择器 */}
+              {periodMode === 'month' && (
+                <input 
+                  type="month" 
+                  value={selectedMonth} 
+                  onChange={(e) => setSelectedMonth(e.target.value)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm bg-slate-50 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              )}
             </div>
           </div>
 
+          {/* 数据看板卡片 */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="p-4 rounded-xl bg-blue-50/50 border border-blue-100/60">
-              <span className="text-xs font-semibold text-blue-600 uppercase tracking-wider">营业总额</span>
+              <span className="text-xs font-semibold text-blue-600 uppercase tracking-wider">
+                {periodMode === 'year' ? `${selectedYear} 全年总营业额` : '总营业额'}
+              </span>
               <div className="text-xl md:text-2xl font-bold text-slate-900 mt-1">¥{stats.totalAmount.toFixed(2)}</div>
-              <span className="text-xs text-slate-500 mt-1 block">{selectedMonth} 订单金额合计</span>
+              <span className="text-xs text-slate-500 mt-1 block">{getPeriodLabel()} 金额合计</span>
             </div>
+            
             <div className="p-4 rounded-xl bg-emerald-50/50 border border-emerald-100/60">
-              <span className="text-xs font-semibold text-emerald-600 uppercase tracking-wider">已收金额 / 定金</span>
+              <span className="text-xs font-semibold text-emerald-600 uppercase tracking-wider">
+                {periodMode === 'year' ? `${selectedYear} 全年实收款` : '已收金额 / 定金'}
+              </span>
               <div className="text-xl md:text-2xl font-bold text-emerald-600 mt-1">¥{stats.receivedAmount.toFixed(2)}</div>
-              <span className="text-xs text-slate-500 mt-1 block">当前已实收金额</span>
+              <span className="text-xs text-slate-500 mt-1 block">实收资金到账汇总</span>
             </div>
+
             <div className="p-4 rounded-xl bg-rose-50/50 border border-rose-100/60">
-              <span className="text-xs font-semibold text-rose-600 uppercase tracking-wider">待收尾款（欠款）</span>
+              <span className="text-xs font-semibold text-rose-600 uppercase tracking-wider">
+                {periodMode === 'year' ? `${selectedYear} 全年累计欠款` : '待收尾款（欠款）'}
+              </span>
               <div className="text-xl md:text-2xl font-bold text-rose-600 mt-1">¥{stats.unpaidAmount.toFixed(2)}</div>
-              <span className="text-xs text-slate-500 mt-1 block">需跟进催收尾款</span>
+              <span className="text-xs text-slate-500 mt-1 block">未结清挂账总计</span>
             </div>
+
             <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/60">
-              <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">订单总数</span>
+              <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                {periodMode === 'year' ? `${selectedYear} 全年订单总量` : '订单总数'}
+              </span>
               <div className="text-xl md:text-2xl font-bold text-slate-800 mt-1">{stats.count} 笔</div>
-              <span className="text-xs text-slate-500 mt-1 block">当月记录总单数</span>
+              <span className="text-xs text-slate-500 mt-1 block">累计录单总量</span>
             </div>
           </div>
         </section>
@@ -273,8 +341,8 @@ export default function App() {
         <section className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
           <div className="p-5 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
-              <h2 className="text-lg font-bold text-slate-800">订单管理</h2>
-              <span className="text-xs text-slate-500">{selectedMonth} · 共 {filteredOrders.length} 条记录</span>
+              <h2 className="text-lg font-bold text-slate-800">订单明细列表</h2>
+              <span className="text-xs text-slate-500">{getPeriodLabel()} · 共 {filteredOrders.length} 条记录</span>
             </div>
             
             <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
@@ -300,7 +368,7 @@ export default function App() {
                 onClick={exportToCSV}
                 className="px-3 py-1.5 border border-slate-200 hover:bg-slate-50 text-slate-700 text-sm font-medium rounded-lg transition-colors flex items-center space-x-1"
               >
-                <span>📊 导出表格</span>
+                <span>📊 导出当前报表</span>
               </button>
             </div>
           </div>
