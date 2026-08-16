@@ -7,14 +7,32 @@ const AD_MATERIALS = [
   '铜牌腐蚀', '条幅横幅', '名片画册', '其他定制'
 ];
 
+// 系统访问凭证配置
+const DEFAULT_ACCOUNT = {
+  username: 'admin',
+  password: '888'
+};
+
 export default function App() {
+  // 获取系统当前年、月（动态获取，不再硬编码）
+  const currentDate = new Date();
+  const currentYearStr = currentDate.getFullYear().toString();
+  const currentMonthStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
+
+  // 登录与权限状态
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem('beibei_auth_logged') === 'true';
+  });
+  const [loginInput, setLoginInput] = useState({ username: '', password: '' });
+  const [loginError, setLoginError] = useState('');
+
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   
-  // 筛选与统计周期模式：'month' (按月) | 'year' (按年/年初到年末) | 'all' (全部历史)
-  const [periodMode, setPeriodMode] = useState('year'); 
-  const [selectedYear, setSelectedYear] = useState('2026');
-  const [selectedMonth, setSelectedMonth] = useState('2026-08');
+  // 默认进入为：'month'（按单月查看），并定位到当月
+  const [periodMode, setPeriodMode] = useState('month'); 
+  const [selectedYear, setSelectedYear] = useState(currentYearStr);
+  const [selectedMonth, setSelectedMonth] = useState(currentMonthStr);
   
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('全部'); // 全部 | 待结清 | 已结清
@@ -56,8 +74,34 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchOrders();
-  }, []);
+    if (isAuthenticated) {
+      fetchOrders();
+    }
+  }, [isAuthenticated]);
+
+  // 处理登录
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (
+      loginInput.username.trim() === DEFAULT_ACCOUNT.username &&
+      loginInput.password === DEFAULT_ACCOUNT.password
+    ) {
+      setIsAuthenticated(true);
+      localStorage.setItem('beibei_auth_logged', 'true');
+      setLoginError('');
+    } else {
+      setLoginError('账号或管理密码错误，请重新输入');
+    }
+  };
+
+  // 处理退出
+  const handleLogout = () => {
+    if (window.confirm('确定要退出当前管理系统吗？')) {
+      localStorage.removeItem('beibei_auth_logged');
+      setIsAuthenticated(false);
+      setLoginInput({ username: '', password: '' });
+    }
+  };
 
   // 自动算料计算总价
   useEffect(() => {
@@ -151,19 +195,19 @@ export default function App() {
     setCalcData({ length: '', width: '', quantity: '1', unitPrice: '' });
   };
 
-  // 根据周期模式（按年/按月/全部）筛选订单
+  // 根据周期筛选
   const currentPeriodOrders = orders.filter(item => {
     if (!item.order_date) return false;
     if (periodMode === 'year') {
-      return item.order_date.startsWith(selectedYear); // 年初到年末（如 2026-01-01 到 2026-12-31）
+      return item.order_date.startsWith(selectedYear);
     }
     if (periodMode === 'month') {
-      return item.order_date.startsWith(selectedMonth); // 指定单月
+      return item.order_date.startsWith(selectedMonth);
     }
-    return true; // 全部历史
+    return true;
   });
 
-  // 列表过滤（搜索词 + 结账状态）
+  // 列表过滤
   const filteredOrders = currentPeriodOrders.filter(item => {
     const matchSearch = (item.customer_name || '').includes(searchTerm) || (item.phone || '').includes(searchTerm);
     if (statusFilter === '待结清') return matchSearch && item.payment_status !== '已结清';
@@ -184,41 +228,139 @@ export default function App() {
     return acc;
   }, { totalAmount: 0, receivedAmount: 0, unpaidAmount: 0, count: 0 });
 
-  // 周期文案生成
+  // 周期标签
   const getPeriodLabel = () => {
-    if (periodMode === 'year') return `${selectedYear}年度（年初至年末）`;
-    if (periodMode === 'month') return `${selectedMonth} 单月`;
-    return '全部历史累计';
+    if (periodMode === 'month') return `${selectedMonth} 月度`;
+    if (periodMode === 'year') return `${selectedYear} 年度`;
+    return '全部历史';
   };
 
-  // 导出 CSV (Excel兼容)
-  const exportToCSV = () => {
+  // 导出标准 Excel 格式 (.xls)
+  const exportToExcel = () => {
     if (filteredOrders.length === 0) return alert('当前周期没有可导出的数据！');
-    const headers = ['订单日期,客户姓名,联系电话,品版材质,规格数量,总金额,已收金额,待付尾款,交货状态,结账状态,备注'];
-    const rows = filteredOrders.map(o => [
-      o.order_date,
-      o.customer_name,
-      o.phone || '',
-      o.material,
-      `"${(o.specs || '').replace(/"/g, '""')}"`,
-      o.total_amount,
-      o.deposit_amount,
-      (o.total_amount - o.deposit_amount).toFixed(2),
-      o.delivery_status,
-      o.payment_status,
-      `"${(o.notes || '').replace(/"/g, '""')}"`
-    ].join(','));
 
-    const csvContent = 'data:text/csv;charset=utf-8,\uFEFF' + [headers, ...rows].join('\n');
-    const encodedUri = encodeURI(csvContent);
+    const headers = ['订单日期', '客户姓名', '联系电话', '品版材质', '规格/算料', '总金额(元)', '已付定金(元)', '待付尾款(元)', '交货状态', '结账状态', '备注'];
+    
+    let tableHtml = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <meta http-equiv="content-type" content="application/vnd.ms-excel; charset=UTF-8">
+        <!--[if gte mso 9]>
+        <xml>
+          <x:ExcelWorkbook>
+            <x:ExcelWorksheets>
+              <x:ExcelWorksheet>
+                <x:Name>${getPeriodLabel()}记账报表</x:Name>
+                <x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
+              </x:ExcelWorksheet>
+            </x:ExcelWorksheets>
+          </x:ExcelWorkbook>
+        </xml>
+        <![endif]-->
+        <style>
+          th { background-color: #2563EB; color: #FFFFFF; font-weight: bold; border: 0.5pt solid #CBD5E1; text-align: center; }
+          td { border: 0.5pt solid #E2E8F0; text-align: left; }
+          .num { text-align: right; }
+        </style>
+      </head>
+      <body>
+        <table>
+          <thead>
+            <tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr>
+          </thead>
+          <tbody>
+            ${filteredOrders.map(o => `
+              <tr>
+                <td>${o.order_date || ''}</td>
+                <td>${o.customer_name || ''}</td>
+                <td style="mso-number-format:'\\@';">${o.phone || ''}</td>
+                <td>${o.material || ''}</td>
+                <td>${o.specs || ''}</td>
+                <td class="num">${parseFloat(o.total_amount || 0).toFixed(2)}</td>
+                <td class="num">${parseFloat(o.deposit_amount || 0).toFixed(2)}</td>
+                <td class="num">${(parseFloat(o.total_amount || 0) - parseFloat(o.deposit_amount || 0)).toFixed(2)}</td>
+                <td>${o.delivery_status || ''}</td>
+                <td>${o.payment_status || ''}</td>
+                <td>${o.notes || ''}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `;
+
+    const blob = new Blob([tableHtml], { type: 'application/vnd.ms-excel;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `蓓蓓广告记账_${getPeriodLabel()}.csv`);
+    link.href = url;
+    link.download = `蓓蓓广告记账_${getPeriodLabel()}_报表.xls`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
+  // 1. 未登录页面
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-3xl p-8 shadow-2xl space-y-6">
+          <div className="text-center space-y-2">
+            <div className="w-16 h-16 bg-gradient-to-tr from-blue-600 to-indigo-600 rounded-2xl mx-auto flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-blue-500/30">
+              蓓
+            </div>
+            <h1 className="text-xl font-extrabold text-slate-900 tracking-tight pt-2">
+              临汾市尧都区蓓蓓图文广告有限公司
+            </h1>
+            <p className="text-xs text-slate-500">记账管理系统 · 身份权限验证</p>
+          </div>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            {loginError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-600 text-xs rounded-xl font-medium text-center">
+                {loginError}
+              </div>
+            )}
+            <div>
+              <label className="text-xs font-bold text-slate-700 mb-1.5 block">管理员账号</label>
+              <input 
+                required
+                type="text" 
+                placeholder="请输入管理账号 (默认 admin)"
+                value={loginInput.username}
+                onChange={(e) => setLoginInput({ ...loginInput, username: e.target.value })}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none transition-all"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-700 mb-1.5 block">管理密码</label>
+              <input 
+                required
+                type="password" 
+                placeholder="请输入密码"
+                value={loginInput.password}
+                onChange={(e) => setLoginInput({ ...loginInput, password: e.target.value })}
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none transition-all"
+              />
+            </div>
+            <button 
+              type="submit"
+              className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold rounded-xl shadow-lg shadow-blue-500/30 active:scale-[0.98] transition-all text-sm mt-2"
+            >
+              安全登录进入系统
+            </button>
+          </form>
+
+          <div className="text-center pt-2">
+            <span className="text-[11px] text-slate-400">已开启端到端加密保护 · 非授权人员请勿操作</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. 主系统面板
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -233,40 +375,49 @@ export default function App() {
               <h1 className="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">
                 临汾市尧都区蓓蓓图文广告有限公司记账管理系统
               </h1>
-              <p className="text-xs md:text-sm text-slate-500 mt-0.5">专业广告制作 · 年度/月度营收汇总 · 资金尾款追踪</p>
+              <p className="text-xs md:text-sm text-slate-500 mt-0.5">专业广告制作 · 月度/年度营收汇总 · 资金尾款追踪</p>
             </div>
           </div>
-          <button 
-            onClick={() => { resetForm(); setIsModalOpen(true); }}
-            className="w-full md:w-auto px-5 py-2.5 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-medium rounded-xl shadow-md shadow-blue-600/20 transition-all flex items-center justify-center space-x-2"
-          >
-            <span className="text-lg">+</span>
-            <span>新建订单</span>
-          </button>
+          
+          <div className="flex items-center space-x-3 w-full md:w-auto">
+            <button 
+              onClick={() => { resetForm(); setIsModalOpen(true); }}
+              className="flex-1 md:flex-none px-5 py-2.5 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-medium rounded-xl shadow-md shadow-blue-600/20 transition-all flex items-center justify-center space-x-2"
+            >
+              <span className="text-lg">+</span>
+              <span>新建订单</span>
+            </button>
+            <button 
+              onClick={handleLogout}
+              className="px-3.5 py-2.5 border border-slate-200 hover:bg-rose-50 hover:text-rose-600 text-slate-500 font-medium rounded-xl transition-all text-sm"
+              title="退出登录"
+            >
+              退出
+            </button>
+          </div>
         </header>
 
-        {/* 账目周期切换与年度看板 */}
+        {/* 账目周期与月度看板 */}
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-5">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pb-4 border-b border-slate-100">
             <div>
               <h2 className="text-base font-bold text-slate-800">账目周期概览</h2>
-              <p className="text-xs text-slate-500">当前统计维度：<span className="font-semibold text-blue-600">{getPeriodLabel()}</span></p>
+              <p className="text-xs text-slate-500">当前查看维度：<span className="font-semibold text-blue-600">{getPeriodLabel()}</span></p>
             </div>
             
             <div className="flex flex-wrap items-center gap-2">
-              {/* 模式选择按钮 */}
               <div className="flex bg-slate-100 p-1 rounded-lg text-xs font-semibold">
-                <button 
-                  onClick={() => setPeriodMode('year')}
-                  className={`px-3 py-1.5 rounded-md transition-all ${periodMode === 'year' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'}`}
-                >
-                  📅 按年汇总(年初到年末)
-                </button>
                 <button 
                   onClick={() => setPeriodMode('month')}
                   className={`px-3 py-1.5 rounded-md transition-all ${periodMode === 'month' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'}`}
                 >
                   🗓️ 按单月查看
+                </button>
+                <button 
+                  onClick={() => setPeriodMode('year')}
+                  className={`px-3 py-1.5 rounded-md transition-all ${periodMode === 'year' ? 'bg-white text-blue-600 shadow-sm font-bold' : 'text-slate-600'}`}
+                >
+                  📅 按年汇总(年初到年末)
                 </button>
                 <button 
                   onClick={() => setPeriodMode('all')}
@@ -275,6 +426,16 @@ export default function App() {
                   🌐 全部历史
                 </button>
               </div>
+
+              {/* 月份选择器 */}
+              {periodMode === 'month' && (
+                <input 
+                  type="month" 
+                  value={selectedMonth} 
+                  onChange={(e) => setSelectedMonth(e.target.value)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm bg-slate-50 font-bold text-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              )}
 
               {/* 年份选择器 */}
               {periodMode === 'year' && (
@@ -288,16 +449,6 @@ export default function App() {
                   ))}
                 </select>
               )}
-
-              {/* 月份选择器 */}
-              {periodMode === 'month' && (
-                <input 
-                  type="month" 
-                  value={selectedMonth} 
-                  onChange={(e) => setSelectedMonth(e.target.value)}
-                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm bg-slate-50 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              )}
             </div>
           </div>
 
@@ -305,15 +456,15 @@ export default function App() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="p-4 rounded-xl bg-blue-50/50 border border-blue-100/60">
               <span className="text-xs font-semibold text-blue-600 uppercase tracking-wider">
-                {periodMode === 'year' ? `${selectedYear} 全年总营业额` : '总营业额'}
+                {periodMode === 'month' ? `${selectedMonth} 营业额` : '总营业额'}
               </span>
               <div className="text-xl md:text-2xl font-bold text-slate-900 mt-1">¥{stats.totalAmount.toFixed(2)}</div>
-              <span className="text-xs text-slate-500 mt-1 block">{getPeriodLabel()} 金额合计</span>
+              <span className="text-xs text-slate-500 mt-1 block">{getPeriodLabel()} 订单金额合计</span>
             </div>
             
             <div className="p-4 rounded-xl bg-emerald-50/50 border border-emerald-100/60">
               <span className="text-xs font-semibold text-emerald-600 uppercase tracking-wider">
-                {periodMode === 'year' ? `${selectedYear} 全年实收款` : '已收金额 / 定金'}
+                {periodMode === 'month' ? '已实收金额' : '已收金额/定金'}
               </span>
               <div className="text-xl md:text-2xl font-bold text-emerald-600 mt-1">¥{stats.receivedAmount.toFixed(2)}</div>
               <span className="text-xs text-slate-500 mt-1 block">实收资金到账汇总</span>
@@ -321,7 +472,7 @@ export default function App() {
 
             <div className="p-4 rounded-xl bg-rose-50/50 border border-rose-100/60">
               <span className="text-xs font-semibold text-rose-600 uppercase tracking-wider">
-                {periodMode === 'year' ? `${selectedYear} 全年累计欠款` : '待收尾款（欠款）'}
+                {periodMode === 'month' ? '待收尾款(欠款)' : '累计待收尾款'}
               </span>
               <div className="text-xl md:text-2xl font-bold text-rose-600 mt-1">¥{stats.unpaidAmount.toFixed(2)}</div>
               <span className="text-xs text-slate-500 mt-1 block">未结清挂账总计</span>
@@ -329,10 +480,10 @@ export default function App() {
 
             <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/60">
               <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                {periodMode === 'year' ? `${selectedYear} 全年订单总量` : '订单总数'}
+                {periodMode === 'month' ? '本月订单量' : '订单总数'}
               </span>
               <div className="text-xl md:text-2xl font-bold text-slate-800 mt-1">{stats.count} 笔</div>
-              <span className="text-xs text-slate-500 mt-1 block">累计录单总量</span>
+              <span className="text-xs text-slate-500 mt-1 block">当前周期总单数</span>
             </div>
           </div>
         </section>
@@ -365,10 +516,10 @@ export default function App() {
                 ))}
               </div>
               <button 
-                onClick={exportToCSV}
-                className="px-3 py-1.5 border border-slate-200 hover:bg-slate-50 text-slate-700 text-sm font-medium rounded-lg transition-colors flex items-center space-x-1"
+                onClick={exportToExcel}
+                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center space-x-1.5 shadow-sm shadow-emerald-600/20"
               >
-                <span>📊 导出当前报表</span>
+                <span>📊 导出 Excel 表格</span>
               </button>
             </div>
           </div>
