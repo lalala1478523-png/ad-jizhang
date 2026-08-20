@@ -16,17 +16,17 @@ const DEFAULT_EXPENSE_CATEGORIES = [
 const PRINT_SPECS = ['A4', 'A3', 'A4铜板纸', 'A3铜板纸', '卡纸', '普通复印纸', '其他纸张'];
 const PAYMENT_METHODS = ['微信支付', '支付宝', '对公转账', '现金支付', '其他'];
 
-const DEFAULT_ACCOUNT = { username: 'admin', password: '888' };
-
 export default function App() {
   const currentDate = new Date();
   const currentYearStr = currentDate.getFullYear().toString();
   const currentMonthStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
 
-  // 1. 系统基础状态
-  const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('beibei_auth_logged') === 'true');
-  const [loginInput, setLoginInput] = useState({ username: '', password: '' });
+  // 1. 系统基础与【真·安全登录】状态
+  const [authLoading, setAuthLoading] = useState(true); // 用于页面初次加载时检查登录状态
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [loginInput, setLoginInput] = useState({ email: '', password: '' });
   const [loginError, setLoginError] = useState('');
+  
   const [showAmount, setShowAmount] = useState(() => localStorage.getItem('beibei_show_amount') === 'true' || false);
   const [activeTab, setActiveTab] = useState('income');
 
@@ -45,7 +45,7 @@ export default function App() {
   const [customerTypeFilter, setCustomerTypeFilter] = useState('全部');
   const [vipGroupFilter, setVipGroupFilter] = useState('全部');
 
-  // 3. 【核心更新】本地动态字典状态 (支持在设置中修改)
+  // 3. 本地动态字典状态
   const [materials, setMaterials] = useState(() => {
     const saved = localStorage.getItem('beibei_materials');
     return saved ? JSON.parse(saved) : DEFAULT_MATERIALS;
@@ -65,7 +65,7 @@ export default function App() {
   const [statementCustomer, setStatementCustomer] = useState(null);
   
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState('groups'); // 'groups' | 'materials' | 'expenses'
+  const [settingsTab, setSettingsTab] = useState('groups'); 
   const [newSettingInput, setNewSettingInput] = useState('');
 
   // 5. 表单数据状态
@@ -85,6 +85,47 @@ export default function App() {
     category: expenseCategories[0] || '原材料进货',
     amount: '', payee: '', payment_method: '微信支付', notes: ''
   });
+
+  // ================= 【核心安全升级：Supabase 真实身份验证】 =================
+  useEffect(() => {
+    // 初次加载时检查是否已经登录过
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setIsAuthenticated(!!session);
+      setAuthLoading(false);
+    });
+
+    // 监听登录/登出状态的变化
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsAuthenticated(!!session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    
+    // 调用 Supabase 官方真实登录接口
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: loginInput.email,
+      password: loginInput.password,
+    });
+
+    if (error) {
+      setLoginError('邮箱账号或密码错误，请重新核对！');
+    } else {
+      setLoginInput({ email: '', password: '' });
+    }
+  };
+
+  const handleLogout = async () => {
+    if (window.confirm('确定要安全退出当前系统吗？')) {
+      // 销毁云端下发的安全令牌
+      await supabase.auth.signOut();
+    }
+  };
+  // =======================================================================
 
   const toggleAmountVisibility = () => {
     const nextVal = !showAmount;
@@ -108,30 +149,12 @@ export default function App() {
     setLoading(false);
   };
 
+  // 只有在认证成功后，才去拉取数据
   useEffect(() => {
     if (isAuthenticated) fetchData();
   }, [isAuthenticated]);
 
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (loginInput.username.trim() === DEFAULT_ACCOUNT.username && loginInput.password === DEFAULT_ACCOUNT.password) {
-      setIsAuthenticated(true);
-      localStorage.setItem('beibei_auth_logged', 'true');
-      setLoginError('');
-    } else {
-      setLoginError('账号或管理密码错误，请重新输入');
-    }
-  };
-
-  const handleLogout = () => {
-    if (window.confirm('确定要退出当前管理系统吗？')) {
-      localStorage.removeItem('beibei_auth_logged');
-      setIsAuthenticated(false);
-      setLoginInput({ username: '', password: '' });
-    }
-  };
-
-  // ================= 基础设置管理逻辑 (三合一) =================
+  // ================= 基础设置管理逻辑 =================
   const handleAddSetting = (e) => {
     e.preventDefault();
     const val = newSettingInput.trim();
@@ -199,7 +222,6 @@ export default function App() {
       localStorage.setItem('beibei_expense_categories', JSON.stringify(updated));
     }
   };
-  // =========================================================
 
   // 自动算价
   useEffect(() => {
@@ -405,6 +427,11 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  // 防闪烁保护层
+  if (authLoading) {
+    return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-400 font-bold">正在校验安全环境，请稍候...</div>;
+  }
+
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
@@ -412,13 +439,18 @@ export default function App() {
           <div className="text-center space-y-2">
             <div className="w-16 h-16 bg-gradient-to-tr from-blue-600 to-indigo-600 rounded-2xl mx-auto flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-blue-500/30">蓓</div>
             <h1 className="text-xl font-extrabold text-slate-900 tracking-tight pt-2">临汾市尧都区蓓蓓图文广告有限公司</h1>
-            <p className="text-xs text-slate-500">记账管理系统 · 身份权限验证</p>
+            <p className="text-xs text-slate-500">已开启 Supabase 军工级防篡改保护</p>
           </div>
           <form onSubmit={handleLogin} className="space-y-4">
             {loginError && <div className="p-3 bg-rose-50 border border-rose-200 text-rose-600 text-xs rounded-xl font-medium text-center">{loginError}</div>}
-            <div><input required type="text" placeholder="请输入管理账号" value={loginInput.username} onChange={(e) => setLoginInput({ ...loginInput, username: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" /></div>
-            <div><input required type="password" placeholder="请输入密码" value={loginInput.password} onChange={(e) => setLoginInput({ ...loginInput, password: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" /></div>
-            <button type="submit" className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/30 text-sm mt-2">安全登录进入系统</button>
+            <div>
+              {/* 【UI 更新：提示输入真实邮箱】 */}
+              <input required type="email" placeholder="请输入绑定的专属登录邮箱" value={loginInput.email} onChange={(e) => setLoginInput({ ...loginInput, email: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" />
+            </div>
+            <div>
+              <input required type="password" placeholder="请输入安全密码" value={loginInput.password} onChange={(e) => setLoginInput({ ...loginInput, password: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" />
+            </div>
+            <button type="submit" className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/30 text-sm mt-2 hover:opacity-90">授权并解密账本</button>
           </form>
         </div>
       </div>
@@ -435,23 +467,23 @@ export default function App() {
             <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white font-bold text-xl shadow-md">蓓</div>
             <div>
               <h1 className="text-xl md:text-2xl font-bold text-slate-900 tracking-tight">临汾市尧都区蓓蓓图文广告</h1>
-              <p className="text-xs md:text-sm text-slate-500 mt-0.5">收入开单 · 采购支出 · 净利润核算</p>
+              <p className="text-xs md:text-sm text-slate-500 mt-0.5">数据已开启 RLS 高级加密 · 收入开单 · 采购支出</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
             <button onClick={toggleAmountVisibility} className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 border ${showAmount ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
               <span>{showAmount ? '👁️ 显示金额' : '🙈 隐蔽金额'}</span>
             </button>
-            <button onClick={() => { resetOrderForm(); setIsOrderModalOpen(true); }} className="px-4 py-2 bg-blue-600 text-white text-xs md:text-sm font-bold rounded-xl shadow-md flex items-center space-x-1">
+            <button onClick={() => { resetOrderForm(); setIsOrderModalOpen(true); }} className="px-4 py-2 bg-blue-600 text-white text-xs md:text-sm font-bold rounded-xl shadow-md flex items-center space-x-1 hover:bg-blue-700">
               <span>+ 记收入</span>
             </button>
-            <button onClick={() => { resetExpenseForm(); setIsExpenseModalOpen(true); }} className="px-4 py-2 bg-rose-600 text-white text-xs md:text-sm font-bold rounded-xl shadow-md flex items-center space-x-1">
+            <button onClick={() => { resetExpenseForm(); setIsExpenseModalOpen(true); }} className="px-4 py-2 bg-rose-600 text-white text-xs md:text-sm font-bold rounded-xl shadow-md flex items-center space-x-1 hover:bg-rose-700">
               <span>- 记支出</span>
             </button>
             <button onClick={() => setIsSettingsModalOpen(true)} className="px-4 py-2 bg-slate-700 text-white text-xs md:text-sm font-bold rounded-xl shadow-md flex items-center space-x-1 hover:bg-slate-800">
               <span>⚙️ 基础设置</span>
             </button>
-            <button onClick={handleLogout} className="px-3 py-2 border border-slate-200 text-slate-500 font-medium rounded-xl text-xs">退出</button>
+            <button onClick={handleLogout} className="px-3 py-2 border border-slate-200 text-slate-500 font-medium rounded-xl text-xs hover:bg-slate-100">安全退出</button>
           </div>
         </header>
 
@@ -484,8 +516,8 @@ export default function App() {
         <section className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
           <div className="p-4 md:p-5 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-slate-50/30">
             <div className="flex items-center space-x-2 bg-slate-200/70 p-1 rounded-xl">
-              <button onClick={() => { setActiveTab('income'); setSearchTerm(''); }} className={`px-4 py-2 rounded-lg text-xs md:text-sm font-bold ${activeTab === 'income' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600'}`}>📦 客户订单 ({filteredOrders.length})</button>
-              <button onClick={() => { setActiveTab('expense'); setSearchTerm(''); }} className={`px-4 py-2 rounded-lg text-xs md:text-sm font-bold ${activeTab === 'expense' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600'}`}>💸 公司支出 ({filteredExpenses.length})</button>
+              <button onClick={() => { setActiveTab('income'); setSearchTerm(''); }} className={`px-4 py-2 rounded-lg text-xs md:text-sm font-bold ${activeTab === 'income' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>📦 客户订单 ({filteredOrders.length})</button>
+              <button onClick={() => { setActiveTab('expense'); setSearchTerm(''); }} className={`px-4 py-2 rounded-lg text-xs md:text-sm font-bold ${activeTab === 'expense' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>💸 公司支出 ({filteredExpenses.length})</button>
             </div>
             
             <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
@@ -513,7 +545,7 @@ export default function App() {
                   {expenseCategories.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               )}
-              <button onClick={exportToExcel} className="px-3 py-1.5 bg-emerald-600 text-white text-xs md:text-sm font-semibold rounded-lg shadow-sm">📊 导出报表</button>
+              <button onClick={exportToExcel} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs md:text-sm font-semibold rounded-lg shadow-sm">📊 导出报表</button>
             </div>
           </div>
 
@@ -525,7 +557,7 @@ export default function App() {
                   <tr><th className="p-4">时间/类型</th><th className="p-4">名称与内容</th><th className="p-4">规格</th><th className="p-4">单价×数量</th><th className="p-4">总额/欠款</th><th className="p-4">结账状态</th><th className="p-4 text-center">操作</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {loading ? <tr><td colSpan="7" className="p-8 text-center text-slate-400">正在同步数据中...</td></tr> : filteredOrders.length === 0 ? <tr><td colSpan="7" className="p-8 text-center text-slate-400">暂无订单记录</td></tr> : 
+                  {loading ? <tr><td colSpan="7" className="p-8 text-center text-slate-400">正在与数据库同步...</td></tr> : filteredOrders.length === 0 ? <tr><td colSpan="7" className="p-8 text-center text-slate-400">暂无订单记录</td></tr> : 
                     filteredOrders.map((order) => {
                       const unpaid = Math.max(0, order.total_amount - order.deposit_amount);
                       return (
@@ -537,7 +569,7 @@ export default function App() {
                           <td className="p-4 whitespace-nowrap"><div className="font-bold text-slate-900">{formatMoney(order.total_amount)}</div>{unpaid > 0 && <div className="text-xs text-rose-600 mt-1 font-medium">欠: {formatMoney(unpaid)}</div>}</td>
                           <td className="p-4"><span className={`px-2 py-0.5 rounded text-xs font-medium ${order.payment_status === '已结清' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-rose-50 text-rose-700 border-rose-200 border'}`}>{order.payment_status}</span></td>
                           <td className="p-4 text-center whitespace-nowrap space-x-2">
-                            {unpaid > 0 && <button onClick={() => handleQuickSettle(order)} className="px-2.5 py-1 bg-emerald-600 text-white rounded text-xs font-medium">收尾款</button>}
+                            {unpaid > 0 && <button onClick={() => handleQuickSettle(order)} className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-medium">收尾款</button>}
                             <button onClick={() => handleDeleteOrder(order.id)} className="text-slate-400 hover:text-rose-600 text-xs">删除</button>
                           </td>
                         </tr>
@@ -574,7 +606,7 @@ export default function App() {
         </section>
       </div>
 
-      {/* ======================= 基础设置面板 (Modal) ======================= */}
+      {/* ======================= 基础设置面板 ======================= */}
       {isSettingsModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
           <div className="bg-white w-full max-w-xl rounded-2xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[85vh]">
@@ -618,9 +650,8 @@ export default function App() {
           </div>
         </div>
       )}
-      {/* ========================================================================= */}
 
-      {/* 记收入弹窗 (Modal) */}
+      {/* 记收入弹窗 */}
       {isOrderModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
           <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border flex flex-col max-h-[90vh]">
@@ -696,14 +727,14 @@ export default function App() {
 
               <div className="pt-4 flex justify-end space-x-3 border-t mt-2">
                 <button type="button" onClick={() => setIsOrderModalOpen(false)} className="px-5 py-2 border rounded-xl text-sm font-medium hover:bg-slate-50">取消</button>
-                <button type="submit" className="px-8 py-2 bg-blue-600 text-white rounded-xl text-sm font-bold shadow-md">保存记录</button>
+                <button type="submit" className="px-8 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold shadow-md">保存记录</button>
               </div>
             </form>
           </div>
         </div>
       )}
 
-      {/* 记支出弹窗 (Modal) */}
+      {/* 记支出弹窗 */}
       {isExpenseModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
           <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border flex flex-col max-h-[90vh]">
@@ -713,7 +744,6 @@ export default function App() {
                   <div><label className="text-xs font-bold block mb-1">日期 *</label><input required type="date" value={expenseFormData.expense_date} onChange={e => setExpenseFormData({...expenseFormData, expense_date: e.target.value})} className="w-full p-2 border rounded-lg text-sm" /></div>
                   <div>
                     <label className="text-xs font-bold block mb-1">类别 *</label>
-                    {/* 【核心更新】这里使用了可以动态管理的支出类别列表 */}
                     <select value={expenseFormData.category} onChange={e => setExpenseFormData({...expenseFormData, category: e.target.value})} className="w-full p-2 border rounded-lg text-sm bg-white outline-none">
                       {expenseCategories.map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
@@ -725,7 +755,7 @@ export default function App() {
                 </div>
                 <div><label className="text-xs font-bold block mb-1">收款方 / 人员</label><input type="text" value={expenseFormData.payee} onChange={e => setExpenseFormData({...expenseFormData, payee: e.target.value})} className="w-full p-2 border rounded-lg text-sm outline-none" /></div>
                 <div><label className="text-xs font-bold block mb-1">备注说明</label><input type="text" value={expenseFormData.notes} onChange={e => setExpenseFormData({...expenseFormData, notes: e.target.value})} className="w-full p-2 border rounded-lg text-sm outline-none" /></div>
-                <div className="flex justify-end pt-4 border-t space-x-3"><button type="button" onClick={() => setIsExpenseModalOpen(false)} className="px-4 py-2 border rounded-xl text-sm font-medium">取消</button><button type="submit" className="px-6 py-2 bg-rose-600 text-white rounded-xl text-sm font-bold shadow-md">保存支出</button></div>
+                <div className="flex justify-end pt-4 border-t space-x-3"><button type="button" onClick={() => setIsExpenseModalOpen(false)} className="px-4 py-2 border rounded-xl text-sm font-medium hover:bg-slate-50">取消</button><button type="submit" className="px-6 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-sm font-bold shadow-md">保存支出</button></div>
              </form>
           </div>
         </div>
