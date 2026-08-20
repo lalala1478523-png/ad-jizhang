@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
 
-// 基础字典默认值
+// 基础字典默认值 (仅作为初始兜底)
 const DEFAULT_MATERIALS = [
   '背胶', '喷绘', '黑白打印', '彩色打印', 'KT板展架', '亚克力门牌', 
   'UV发光字', '不锈钢精工字', 'PVC雕刻', '钛金字', 
@@ -21,12 +21,15 @@ export default function App() {
   const currentYearStr = currentDate.getFullYear().toString();
   const currentMonthStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
 
-  // 1. 系统基础与【真·安全登录】状态
-  const [authLoading, setAuthLoading] = useState(true); // 用于页面初次加载时检查登录状态
+  // 1. 系统基础状态
+  const [authLoading, setAuthLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isGuestMode, setIsGuestMode] = useState(false);
+
   const [loginInput, setLoginInput] = useState({ email: '', password: '' });
   const [loginError, setLoginError] = useState('');
   
+  // 金额显示开关依然放本地，因为不涉及核心数据
   const [showAmount, setShowAmount] = useState(() => localStorage.getItem('beibei_show_amount') === 'true' || false);
   const [activeTab, setActiveTab] = useState('income');
 
@@ -45,24 +48,14 @@ export default function App() {
   const [customerTypeFilter, setCustomerTypeFilter] = useState('全部');
   const [vipGroupFilter, setVipGroupFilter] = useState('全部');
 
-  // 3. 本地动态字典状态
-  const [materials, setMaterials] = useState(() => {
-    const saved = localStorage.getItem('beibei_materials');
-    return saved ? JSON.parse(saved) : DEFAULT_MATERIALS;
-  });
-  const [vipGroups, setVipGroups] = useState(() => {
-    const saved = localStorage.getItem('beibei_vip_groups');
-    return saved ? JSON.parse(saved) : ['政府单位', '同行代工', '企业直客'];
-  });
-  const [expenseCategories, setExpenseCategories] = useState(() => {
-    const saved = localStorage.getItem('beibei_expense_categories');
-    return saved ? JSON.parse(saved) : DEFAULT_EXPENSE_CATEGORIES;
-  });
+  // 3. 【核心升级：云端字典状态】
+  const [materials, setMaterials] = useState(DEFAULT_MATERIALS);
+  const [vipGroups, setVipGroups] = useState(['政府单位', '同行代工', '企业直客']);
+  const [expenseCategories, setExpenseCategories] = useState(DEFAULT_EXPENSE_CATEGORIES);
 
   // 4. 弹窗控制状态
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
-  const [statementCustomer, setStatementCustomer] = useState(null);
   
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState('groups'); 
@@ -86,15 +79,13 @@ export default function App() {
     amount: '', payee: '', payment_method: '微信支付', notes: ''
   });
 
-  // ================= 【核心安全升级：Supabase 真实身份验证】 =================
+  // ================= 身份验证逻辑 =================
   useEffect(() => {
-    // 初次加载时检查是否已经登录过
     supabase.auth.getSession().then(({ data: { session } }) => {
       setIsAuthenticated(!!session);
       setAuthLoading(false);
     });
 
-    // 监听登录/登出状态的变化
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setIsAuthenticated(!!session);
     });
@@ -105,25 +96,30 @@ export default function App() {
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginError('');
-    
-    // 调用 Supabase 官方真实登录接口
     const { data, error } = await supabase.auth.signInWithPassword({
       email: loginInput.email,
       password: loginInput.password,
     });
-
-    if (error) {
-      setLoginError('邮箱账号或密码错误，请重新核对！');
-    } else {
-      setLoginInput({ email: '', password: '' });
-    }
+    if (error) setLoginError('专属账号或密码错误，非店长请使用访客模式！');
+    else setLoginInput({ email: '', password: '' });
   };
 
   const handleLogout = async () => {
+    if (isGuestMode) {
+      setIsGuestMode(false);
+      return;
+    }
     if (window.confirm('确定要安全退出当前系统吗？')) {
-      // 销毁云端下发的安全令牌
       await supabase.auth.signOut();
     }
+  };
+
+  const blockGuestAction = () => {
+    if (isGuestMode) {
+      alert('🔒 访客模式限制：当前仅供界面效果展示，无权修改或保存任何真实数据！');
+      return true;
+    }
+    return false;
   };
   // =======================================================================
 
@@ -138,90 +134,114 @@ export default function App() {
     return `${prefix}${parseFloat(amount || 0).toFixed(2)}`;
   };
 
+  // 【核心升级：同时从云端拉取账单和设置字典】
   const fetchData = async () => {
+    if (isGuestMode || !isAuthenticated) {
+      setOrders([]);
+      setExpenses([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
-    const [ordersRes, expensesRes] = await Promise.all([
+    const [ordersRes, expensesRes, settingsRes] = await Promise.all([
       supabase.from('orders').select('*').order('order_date', { ascending: false }),
-      supabase.from('expenses').select('*').order('expense_date', { ascending: false })
+      supabase.from('expenses').select('*').order('expense_date', { ascending: false }),
+      supabase.from('app_settings').select('*').eq('id', 1).single() // 拉取云端字典
     ]);
+
     if (ordersRes.data) setOrders(ordersRes.data);
     if (expensesRes.data) setExpenses(expensesRes.data);
+    
+    if (settingsRes.data) {
+      setMaterials(settingsRes.data.materials || DEFAULT_MATERIALS);
+      setVipGroups(settingsRes.data.vip_groups || ['政府单位', '同行代工', '企业直客']);
+      setExpenseCategories(settingsRes.data.expense_categories || DEFAULT_EXPENSE_CATEGORIES);
+    }
+    
     setLoading(false);
   };
 
-  // 只有在认证成功后，才去拉取数据
   useEffect(() => {
-    if (isAuthenticated) fetchData();
-  }, [isAuthenticated]);
+    fetchData();
+  }, [isAuthenticated, isGuestMode]);
 
-  // ================= 基础设置管理逻辑 =================
-  const handleAddSetting = (e) => {
+  // ================= 基础设置管理逻辑 (云端实时同步) =================
+  const handleAddSetting = async (e) => {
     e.preventDefault();
+    if (blockGuestAction()) return;
+
     const val = newSettingInput.trim();
     if (!val) return;
 
+    let updated;
     if (settingsTab === 'groups') {
       if (vipGroups.includes(val)) return alert('该分组已存在！');
-      const updated = [...vipGroups, val];
+      updated = [...vipGroups, val];
       setVipGroups(updated);
-      localStorage.setItem('beibei_vip_groups', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ vip_groups: updated }).eq('id', 1);
     } else if (settingsTab === 'materials') {
       if (materials.includes(val)) return alert('该材质已存在！');
-      const updated = [...materials, val];
+      updated = [...materials, val];
       setMaterials(updated);
-      localStorage.setItem('beibei_materials', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ materials: updated }).eq('id', 1);
     } else if (settingsTab === 'expenses') {
       if (expenseCategories.includes(val)) return alert('该支出类别已存在！');
-      const updated = [...expenseCategories, val];
+      updated = [...expenseCategories, val];
       setExpenseCategories(updated);
-      localStorage.setItem('beibei_expense_categories', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ expense_categories: updated }).eq('id', 1);
     }
     setNewSettingInput('');
   };
 
-  const handleDeleteSetting = (item, type) => {
+  const handleDeleteSetting = async (item, type) => {
+    if (blockGuestAction()) return;
     if (!window.confirm(`确定要删除【${item}】吗？(历史记录不受影响)`)) return;
     
+    let updated;
     if (type === 'groups') {
-      const updated = vipGroups.filter(g => g !== item);
+      updated = vipGroups.filter(g => g !== item);
       setVipGroups(updated);
-      localStorage.setItem('beibei_vip_groups', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ vip_groups: updated }).eq('id', 1);
       if (orderFormData.vip_group === item) setOrderFormData({ ...orderFormData, vip_group: '' });
     } else if (type === 'materials') {
-      const updated = materials.filter(m => m !== item);
+      updated = materials.filter(m => m !== item);
       setMaterials(updated);
-      localStorage.setItem('beibei_materials', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ materials: updated }).eq('id', 1);
       if (orderFormData.material === item) setOrderFormData({ ...orderFormData, material: updated[0] || '' });
     } else if (type === 'expenses') {
-      const updated = expenseCategories.filter(c => c !== item);
+      updated = expenseCategories.filter(c => c !== item);
       setExpenseCategories(updated);
-      localStorage.setItem('beibei_expense_categories', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ expense_categories: updated }).eq('id', 1);
       if (expenseFormData.category === item) setExpenseFormData({ ...expenseFormData, category: updated[0] || '' });
     }
   };
 
-  const handleEditSetting = (oldItem, type) => {
+  const handleEditSetting = async (oldItem, type) => {
+    if (blockGuestAction()) return;
     const newItem = window.prompt(`修改【${oldItem}】的名称为：`, oldItem);
     if (!newItem || newItem.trim() === '' || newItem === oldItem) return;
     const val = newItem.trim();
     
+    let updated;
     if (type === 'groups') {
       if (vipGroups.includes(val)) return alert('该名称已存在！');
-      const updated = vipGroups.map(g => g === oldItem ? val : g);
+      updated = vipGroups.map(g => g === oldItem ? val : g);
       setVipGroups(updated);
-      localStorage.setItem('beibei_vip_groups', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ vip_groups: updated }).eq('id', 1);
     } else if (type === 'materials') {
       if (materials.includes(val)) return alert('该名称已存在！');
-      const updated = materials.map(m => m === oldItem ? val : m);
+      updated = materials.map(m => m === oldItem ? val : m);
       setMaterials(updated);
-      localStorage.setItem('beibei_materials', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ materials: updated }).eq('id', 1);
     } else if (type === 'expenses') {
       if (expenseCategories.includes(val)) return alert('该名称已存在！');
-      const updated = expenseCategories.map(c => c === oldItem ? val : c);
+      updated = expenseCategories.map(c => c === oldItem ? val : c);
       setExpenseCategories(updated);
-      localStorage.setItem('beibei_expense_categories', JSON.stringify(updated));
+      await supabase.from('app_settings').update({ expense_categories: updated }).eq('id', 1);
     }
   };
+  // =========================================================
 
   // 自动算价
   useEffect(() => {
@@ -256,6 +276,8 @@ export default function App() {
 
   const handleOrderSubmit = async (e) => {
     e.preventDefault();
+    if (blockGuestAction()) return;
+
     const total = parseFloat(orderFormData.total_amount) || 0;
     const deposit = parseFloat(orderFormData.deposit_amount) || 0;
     const isPaid = deposit >= total && total > 0;
@@ -278,6 +300,8 @@ export default function App() {
 
   const handleExpenseSubmit = async (e) => {
     e.preventDefault();
+    if (blockGuestAction()) return;
+
     const amt = parseFloat(expenseFormData.amount) || 0;
     if (amt <= 0) return alert('请输入有效的支出金额！');
     const { error } = await supabase.from('expenses').insert([{ ...expenseFormData, amount: amt }]);
@@ -290,6 +314,7 @@ export default function App() {
   };
 
   const handleQuickSettle = async (order) => {
+    if (blockGuestAction()) return;
     const unpaid = order.total_amount - order.deposit_amount;
     if (!window.confirm(`确认结清剩余尾款 ¥${unpaid.toFixed(2)} 吗？`)) return;
     const { error } = await supabase.from('orders').update({ deposit_amount: order.total_amount, payment_status: '已结清' }).eq('id', order.id);
@@ -297,12 +322,14 @@ export default function App() {
   };
 
   const handleDeleteOrder = async (id) => {
+    if (blockGuestAction()) return;
     if (!window.confirm('确定要删除此条订单记录吗？')) return;
     const { error } = await supabase.from('orders').delete().eq('id', id);
     if (error) alert('删除失败: ' + error.message); else fetchData();
   };
 
   const handleDeleteExpense = async (id) => {
+    if (blockGuestAction()) return;
     if (!window.confirm('确定要删除此条支出记录吗？')) return;
     const { error } = await supabase.from('expenses').delete().eq('id', id);
     if (error) alert('删除失败: ' + error.message); else fetchData();
@@ -367,6 +394,7 @@ export default function App() {
   const getPeriodLabel = () => periodMode === 'month' ? `${selectedMonth} 月度` : periodMode === 'year' ? `${selectedYear} 年度` : '全部历史';
 
   const exportToExcel = () => {
+    if (blockGuestAction()) return;
     let htmlStr = '';
     let fileName = '';
 
@@ -432,25 +460,31 @@ export default function App() {
     return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-400 font-bold">正在校验安全环境，请稍候...</div>;
   }
 
-  if (!isAuthenticated) {
+  // 既没有真实登录，也没有点击访客模式，就停在登录墙
+  if (!isAuthenticated && !isGuestMode) {
     return (
       <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-white rounded-3xl p-8 shadow-2xl space-y-6">
           <div className="text-center space-y-2">
             <div className="w-16 h-16 bg-gradient-to-tr from-blue-600 to-indigo-600 rounded-2xl mx-auto flex items-center justify-center text-white text-2xl font-bold shadow-lg shadow-blue-500/30">蓓</div>
-            <h1 className="text-xl font-extrabold text-slate-900 tracking-tight pt-2">临汾市尧都区蓓蓓图文广告有限公司</h1>
+            <h1 className="text-xl font-extrabold text-slate-900 tracking-tight pt-2">临汾市尧都区蓓蓓图文广告</h1>
             <p className="text-xs text-slate-500">已开启 Supabase 军工级防篡改保护</p>
           </div>
-          <form onSubmit={handleLogin} className="space-y-4">
+          <form onSubmit={handleLogin} className="space-y-3">
             {loginError && <div className="p-3 bg-rose-50 border border-rose-200 text-rose-600 text-xs rounded-xl font-medium text-center">{loginError}</div>}
             <div>
-              {/* 【UI 更新：提示输入真实邮箱】 */}
               <input required type="email" placeholder="请输入绑定的专属登录邮箱" value={loginInput.email} onChange={(e) => setLoginInput({ ...loginInput, email: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" />
             </div>
             <div>
               <input required type="password" placeholder="请输入安全密码" value={loginInput.password} onChange={(e) => setLoginInput({ ...loginInput, password: e.target.value })} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none" />
             </div>
-            <button type="submit" className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/30 text-sm mt-2 hover:opacity-90">授权并解密账本</button>
+            <button type="submit" className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold rounded-xl shadow-lg shadow-blue-500/30 text-sm mt-2 hover:opacity-90">店长专属：授权并解密账本</button>
+            
+            <div className="pt-2 border-t border-slate-100 mt-4">
+              <button type="button" onClick={() => setIsGuestMode(true)} className="w-full py-3 bg-slate-100 text-slate-600 font-bold rounded-xl text-sm hover:bg-slate-200 transition-colors">
+                👀 访客参观模式 (仅展示系统界面)
+              </button>
+            </div>
           </form>
         </div>
       </div>
@@ -459,8 +493,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 p-3 md:p-8">
+      {isGuestMode && (
+        <div className="max-w-7xl mx-auto mb-4 bg-amber-50 border border-amber-200 text-amber-700 text-sm font-bold p-3 rounded-xl text-center flex items-center justify-center space-x-2">
+          <span>👀 您正在使用【访客参观模式】查看界面布局，当前不连接数据库，无法看到或修改任何真实数据！</span>
+        </div>
+      )}
+
       <div className="max-w-7xl mx-auto space-y-5">
-        
         {/* 顶部标题栏 */}
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center bg-white p-5 rounded-2xl shadow-sm border border-slate-100 gap-4">
           <div className="flex items-center space-x-3">
@@ -483,7 +522,9 @@ export default function App() {
             <button onClick={() => setIsSettingsModalOpen(true)} className="px-4 py-2 bg-slate-700 text-white text-xs md:text-sm font-bold rounded-xl shadow-md flex items-center space-x-1 hover:bg-slate-800">
               <span>⚙️ 基础设置</span>
             </button>
-            <button onClick={handleLogout} className="px-3 py-2 border border-slate-200 text-slate-500 font-medium rounded-xl text-xs hover:bg-slate-100">安全退出</button>
+            <button onClick={handleLogout} className={`px-4 py-2 font-bold rounded-xl text-xs ${isGuestMode ? 'bg-slate-800 text-white' : 'border border-slate-200 text-slate-500 hover:bg-slate-100'}`}>
+              {isGuestMode ? '退出参观模式' : '安全退出'}
+            </button>
           </div>
         </header>
 
@@ -557,7 +598,7 @@ export default function App() {
                   <tr><th className="p-4">时间/类型</th><th className="p-4">名称与内容</th><th className="p-4">规格</th><th className="p-4">单价×数量</th><th className="p-4">总额/欠款</th><th className="p-4">结账状态</th><th className="p-4 text-center">操作</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {loading ? <tr><td colSpan="7" className="p-8 text-center text-slate-400">正在与数据库同步...</td></tr> : filteredOrders.length === 0 ? <tr><td colSpan="7" className="p-8 text-center text-slate-400">暂无订单记录</td></tr> : 
+                  {isGuestMode ? <tr><td colSpan="7" className="p-8 text-center text-slate-400 font-bold bg-slate-50/50">访客模式：真实数据已被隐藏</td></tr> : loading ? <tr><td colSpan="7" className="p-8 text-center text-slate-400">正在与数据库同步...</td></tr> : filteredOrders.length === 0 ? <tr><td colSpan="7" className="p-8 text-center text-slate-400">暂无订单记录</td></tr> : 
                     filteredOrders.map((order) => {
                       const unpaid = Math.max(0, order.total_amount - order.deposit_amount);
                       return (
@@ -589,7 +630,7 @@ export default function App() {
                   <tr><th className="p-4">支出日期</th><th className="p-4">分类</th><th className="p-4">金额</th><th className="p-4">收款方</th><th className="p-4">备注</th><th className="p-4 text-center">操作</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredExpenses.map(exp => (
+                  {isGuestMode ? <tr><td colSpan="6" className="p-8 text-center text-slate-400 font-bold bg-slate-50/50">访客模式：真实数据已被隐藏</td></tr> : filteredExpenses.map(exp => (
                     <tr key={exp.id} className="hover:bg-rose-50/20">
                       <td className="p-4 whitespace-nowrap">{exp.expense_date}</td>
                       <td className="p-4"><span className="px-2 py-1 bg-rose-50 text-rose-700 rounded text-xs font-bold border-rose-100 border">{exp.category}</span></td>
@@ -611,7 +652,7 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
           <div className="bg-white w-full max-w-xl rounded-2xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[85vh]">
             <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-800 text-white">
-              <h3 className="font-bold text-lg flex items-center space-x-2"><span>⚙️ 基础配置面板</span></h3>
+              <h3 className="font-bold text-lg flex items-center space-x-2"><span>⚙️ 基础配置面板 (云端同步)</span></h3>
               <button onClick={() => setIsSettingsModalOpen(false)} className="text-slate-300 hover:text-white text-xl">✕</button>
             </div>
             
@@ -631,11 +672,11 @@ export default function App() {
                   } 
                   className="flex-1 px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
                 />
-                <button type="submit" className={`px-4 py-2 text-white text-sm font-bold rounded-lg ${settingsTab === 'expenses' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-slate-800 hover:bg-slate-900'}`}>添加</button>
+                <button type="submit" className={`px-4 py-2 text-white text-sm font-bold rounded-lg ${settingsTab === 'expenses' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-slate-800 hover:bg-slate-900'}`}>添加并同步</button>
               </form>
 
               <div className="space-y-2">
-                <div className="text-xs font-bold text-slate-500 uppercase px-1 mb-2">当前列表 (点击操作)</div>
+                <div className="text-xs font-bold text-slate-500 uppercase px-1 mb-2">当前云端列表 (点击操作)</div>
                 {(settingsTab === 'groups' ? vipGroups : settingsTab === 'materials' ? materials : expenseCategories).map(item => (
                   <div key={item} className={`flex justify-between items-center bg-white p-3 border rounded-xl shadow-sm transition-colors ${settingsTab === 'expenses' ? 'hover:border-rose-200' : 'hover:border-blue-200'}`}>
                     <span className="font-semibold text-sm text-slate-800">{item}</span>
